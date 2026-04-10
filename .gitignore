@@ -1,0 +1,26 @@
+# Environment variables (contains secrets)
+.env
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+
+# Temp/intermediate files (regenerable)
+_*.json
+_*.csv
+
+# Preview and report outputs (regenerable)
+*_preview.json
+*_report.json
+
+# HTML debug snapshots
+*.html

@@ -1,0 +1,24 @@
+---
+description: Safety rules for sending emails - requires explicit confirmation and protects production data
+alwaysApply: true
+---
+
+# Email Sending Safety Rules
+
+## Rule 1: Never send emails without explicit permission
+
+- NEVER execute `send_postmark.py --send` or any email-sending command unless the user says exactly **"Please send email"**
+- Always show a preview (dry run) first and wait for confirmation
+- If the user says "send", "go ahead", "do it" or similar — that is NOT enough. You must ask them to confirm with "Please send email"
+
+## Rule 2: Never use production email lists
+
+- NEVER use `crawled_conferences_v2.json` or `crawled_conferences_v2.csv` as email recipients unless the user explicitly tells you to use those specific files
+- Default data source is `test_data.csv`
+- If the user says "send emails" without specifying a data source, always use `test_data.csv`
+
+## Rule 3: Always use `--test` with test data
+
+- When using `test_data.csv`, ALWAYS pass `--test` to the script so data goes to `crm_test` (not production `crm`)
+- Example: `python send_postmark.py test_data.csv --test`, `python send_followup.py --test`, `python crm_check.py --test`
+- NEVER write test email results to the production database
