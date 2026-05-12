@@ -1,0 +1,57 @@
+---
+description: Safety rules for managing background processes - prevent duplicate processes and verify kills
+alwaysApply: true
+---
+
+# Process Safety Rules
+
+## Rule 1: Verify kill before starting a new process
+
+- After killing a process, ALWAYS run `ps aux | grep <process_name> | grep -v grep` to confirm the process is gone
+- If the process still appears in `ps` output, retry `kill` (escalate to `kill -9` if needed) and verify again
+- NEVER start a new instance of the same script until you have confirmed zero matching processes in `ps` output
+- This applies to ALL long-running commands: crawlers, email senders, servers, etc.
+
+## Rule 2: Check for existing processes before starting
+
+- Before launching any background or long-running command, ALWAYS check if the same script is already running:
+  ```
+  ps aux | grep <script_name> | grep -v grep
+  ```
+- If a matching process exists, ask the user whether to kill it before proceeding
+- NEVER run two instances of the same script in parallel unless the user explicitly requests it
+- For email sending specifically: also check Postmark API (see Rule 5) to confirm no sends are in progress before starting a new send
+
+## Rule 3: Track PIDs explicitly
+
+- When backgrounding a command, record the PID returned by the shell
+- When killing, use the exact PID — do not rely on pattern-based kill alone
+- After `kill <PID>`, verify with `ps -p <PID>` that the process no longer exists
+
+## Rule 4: Email sending is single-instance only
+
+- `send_postmark.py --send` must NEVER have two concurrent instances
+- Before running `send_postmark.py --send`, always:
+  1. Run `ps aux | grep send_postmark | grep -v grep` to confirm no process is running
+  2. Check Postmark API to confirm no recent sends are in flight (see Rule 5)
+- If a send process gets stuck, kill it, verify it is dead via `ps`, AND check Postmark API for actual delivery before retrying
+
+## Rule 5: Verify email send results via Postmark API, not just terminal
+
+- If the terminal shows no send output or appears stuck, do NOT assume emails were not sent
+- Always check Postmark API for actual delivery status:
+  ```
+  GET https://api.postmarkapp.com/messages/outbound?count=50&offset=0
+  ```
+- Filter by `ReceivedAt` date AND by the campaign's subject keyword (e.g. "Quick question") to isolate cold emails from product notification emails (support tickets, review notifications, etc.)
+- The Postmark server is shared with PaperFox product emails — NEVER count all messages as cold emails; always filter by subject
+- Only after confirming via Postmark API that no emails were sent should you consider retrying
+
+## Rule 6: Stop crawl immediately on connection errors
+
+- If crawl logs show `Connection error`, `OpenAI connection error`, `Cannot connect to proxy`, or repeated request-level connection failures, STOP the crawl immediately
+- Kill the active crawler process using its exact PID, then verify it is dead with both:
+  1. `ps -p <PID>`
+  2. `ps aux | grep <script_name> | grep -v grep`
+- Do NOT continue crawling in the same run after a connection error appears
+- Before any retry, first fix connectivity (proxy/network/API access) and then restart from retry/resume mode

@@ -33,6 +33,8 @@ def load_template(path="email-template.md"):
 def render(template_str, conference_name, first_name, platform="EasyChair"):
     """Replace placeholders in template string."""
     result = template_str.replace("[Conference Name]", conference_name)
+    if first_name == _FALLBACK_GREETING:
+        result = result.replace("Hi [Name]", first_name)
     result = result.replace("[Name]", first_name)
     result = result.replace("[Platform]", platform)
     return result
@@ -62,28 +64,87 @@ def plain_to_html(text):
 
 # ---------- name extraction ----------
 
-_TITLE_PREFIXES = ("Prof.", "Prof ", "Professor ", "Dr.", "Dr ")
+import re as _re
+
+_CREDENTIAL_RE = _re.compile(
+    r',\s*(?:'
+    r'S\.T\.|M\.T\.|M\.Eng\.?|M\.Kom\.?|M\.Sc\.?|M\.Cs\.?|M\.Med\.Ed\.?|'
+    r'M\.Farm\.?|M\.Kes\.?|MNSc\.?|MM\.?|M\.InfoTech|M\.A\.D\.E|'
+    r'S\.Si\.?|S\.Kom\.?|B\.Eng\.?|Ns\.?|'
+    r'Ph\.?\s*D\.?|IEEE\s*Member|IEEE'
+    r').*$', _re.IGNORECASE)
+
+_TITLE_TOKENS = {
+    "prof.", "prof", "professor", "profesor",
+    "dr.", "dr",
+    "assoc.", "associate",
+    "ir.", "ts.", "apt.", "eng.",
+    "mr.", "mrs.", "ms.",
+    "dr.ing.", "dr.-ing.",
+    "h.e.", "en.",
+}
+
+_FALLBACK_GREETING = "Dear Conference Chair"
+
+
+def _normalize_case(word: str) -> str:
+    parts = word.split("-")
+    normalized = [p.capitalize() if p.isupper() and len(p) > 2 else p for p in parts]
+    return "-".join(normalized)
 
 
 def extract_greeting_name(full_name: str) -> str:
     """Extract the appropriate greeting name from a full name.
 
-    - "Prof. Susiji Wickramasinghe" -> "Prof. Wickramasinghe"
-    - "Dr. Thilini Anupama"        -> "Dr. Anupama"
-    - "Francesca Greselin"         -> "Francesca"
-    - ""                           -> "there"
+    Handles complex academic titles (Assoc. Prof. Ir. Dr.),
+    credential suffixes (S.T., M.Eng., Ph.D.), and ALL-CAPS surnames.
     """
     name = (full_name or "").strip()
     if not name:
         return "there"
-    for prefix in _TITLE_PREFIXES:
-        if name.startswith(prefix):
-            title = prefix.rstrip()
-            remainder = name[len(prefix):].strip().split()
-            if remainder:
-                return f"{title} {remainder[-1]}"
-            return "there"
-    return name.split()[0]
+
+    name = _CREDENTIAL_RE.sub("", name).strip().rstrip(".")
+
+    # Handle Prof.(Dr.) style
+    name = _re.sub(r'Prof\.\s*\(Dr\.\)', 'Prof.', name, flags=_re.IGNORECASE)
+
+    tokens = name.split()
+    title_end = 0
+    has_prof = False
+    has_dr = False
+    for i, tok in enumerate(tokens):
+        low = tok.lower().rstrip(",")
+        if low in _TITLE_TOKENS:
+            title_end = i + 1
+            if low in ("prof.", "prof", "professor", "profesor"):
+                has_prof = True
+            if low in ("dr.", "dr", "dr.ing.", "dr.-ing."):
+                has_dr = True
+        elif low.startswith("dr.") or low.startswith("dr-"):
+            title_end = i + 1
+            has_dr = True
+        else:
+            break
+
+    remainder = tokens[title_end:]
+    if not remainder:
+        return _FALLBACK_GREETING
+
+    remainder = [_normalize_case(w) for w in remainder]
+
+    if has_prof:
+        return f"Prof. {remainder[-1]}"
+    if has_dr:
+        return f"Dr. {remainder[-1]}"
+
+    first = remainder[0]
+    _NOT_NAMES = {"md", "st", "mt"}
+    if len(first) <= 1 or first.endswith(".") or first.endswith(","):
+        return _FALLBACK_GREETING
+    if first.lower() in _NOT_NAMES:
+        return _FALLBACK_GREETING
+
+    return first
 
 
 # ---------- data loaders ----------
@@ -217,6 +278,7 @@ def send_email(recipient, subject, plain_body, html_body, dry_run=True):
                 "TrackLinks": "HtmlOnly",
             },
             timeout=30,
+            proxies={"http": None, "https": None},
         )
         data = resp.json()
         if resp.status_code == 200 and data.get("ErrorCode") == 0:
@@ -308,8 +370,11 @@ def main():
         result = send_email(r, subject, plain_body, html_body, dry_run=dry_run)
         results.append(result)
 
-        if not dry_run and i < len(recipients) - 1:
-            time.sleep(0.5)
+        if not dry_run:
+            status = result.get("status", "?")
+            print(f"  [{i+1}/{len(recipients)}] {r['chair_email']:40s} {status}")
+            if i < len(recipients) - 1:
+                time.sleep(0.5)
 
     # Summary
     sent = sum(1 for r in results if r["status"] == "sent")

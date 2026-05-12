@@ -8,7 +8,7 @@ import re
 import signal
 import time
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -59,6 +59,23 @@ BAD_EMAIL_DOMAINS = (
 OPENAI_SEARCH_DELAY = 1.0
 
 COMMITTEE_KEYWORDS = ("committee", "organiz", "chair", "people", "team", "board", "contact")
+
+
+def is_connection_error(err: Exception) -> bool:
+    """Detect FATAL connectivity failures (proxy down, OpenAI unreachable).
+
+    Per-site failures like SSL cert errors, DNS failures for one conference
+    domain, or connection refused on a single host are NOT fatal — those just
+    skip the conference and fall through to OpenAI web search.
+    """
+    msg = str(err).lower()
+    if "openai connection error" in msg:
+        return True
+    if "cannot connect to proxy" in msg:
+        return True
+    if "proxyerror" in msg and "127.0.0.1" in msg:
+        return True
+    return False
 
 
 def normalize_name(name: str) -> str:
@@ -134,13 +151,104 @@ def safe_json_from_text(text: str):
     return None
 
 
+_BOT_CHALLENGE_MARKERS = (
+    "just a moment",
+    "checking your browser",
+    "cf-browser-verification",
+    "cf-challenge",
+    "attention required! | cloudflare",
+    "ddos protection by cloudflare",
+    "enable javascript and cookies to continue",
+    "please enable javascript",
+    "_cf_chl_opt",
+    "challenges.cloudflare.com",
+)
+
+
+def _looks_like_bot_challenge(html: str) -> bool:
+    if not html:
+        return False
+    snippet = html[:5000].lower()
+    return any(marker in snippet for marker in _BOT_CHALLENGE_MARKERS)
+
+
+def _fetch_via_jina_mirror(url: str) -> str:
+    """Fetch page text via r.jina.ai mirror as last-resort fallback."""
+    mirror_url = f"https://r.jina.ai/http://{url.lstrip('/')}" if not url.startswith("http") else f"https://r.jina.ai/{url}"
+    resp = requests.get(mirror_url, timeout=HTTP_TIMEOUT + 10)
+    resp.raise_for_status()
+    text = resp.text or ""
+    if "error 451" in text.lower() or len(text) < 300:
+        raise requests.HTTPError(f"Jina mirror returned unusable content for {url}")
+    return text
+
+
 def fetch_url(url: str, min_length: int = 0) -> str:
-    """Fetch a URL. If min_length > 0 and the response is shorter, retry with Playwright."""
-    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-    resp = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+    """Fetch a URL with anti-bot fallbacks.
+
+    Order of attempts:
+      1. requests.get with Chrome UA
+      2. If status is 403/429/503: retry with Safari UA + Referer + Accept-Language
+      3. If page is a Cloudflare/JS challenge or shorter than min_length: try headless Chromium
+    """
+    chrome_headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
+    resp = requests.get(url, headers=chrome_headers, timeout=HTTP_TIMEOUT)
+
+    if resp.status_code in (403, 429, 503):
+        parsed = urlparse(url)
+        origin = f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme and parsed.netloc else url
+        fallback_headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+            "Referer": origin,
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        time.sleep(1.0)
+        try:
+            retry_resp = requests.get(url, headers=fallback_headers, timeout=HTTP_TIMEOUT)
+            if retry_resp.status_code < 400:
+                resp = retry_resp
+        except requests.RequestException:
+            pass
+
+    if resp.status_code in (403, 429, 503):
+        pw_html = _fetch_with_playwright(url)
+        if pw_html and not _looks_like_bot_challenge(pw_html):
+            time.sleep(REQUEST_DELAY)
+            return pw_html
+        # Last-resort fallback for anti-bot blocked pages.
+        try:
+            print("    ! Trying jina mirror fallback...")
+            jina_text = _fetch_via_jina_mirror(url)
+            time.sleep(REQUEST_DELAY)
+            return jina_text
+        except Exception:
+            pass
+        # Playwright and mirror both failed.
+        resp.raise_for_status()
+
     resp.raise_for_status()
     time.sleep(REQUEST_DELAY)
     html = resp.text
+
+    if _looks_like_bot_challenge(html):
+        print(f"    ! Detected bot-challenge page, retrying with Playwright")
+        pw_html = _fetch_with_playwright(url)
+        if pw_html and not _looks_like_bot_challenge(pw_html):
+            return pw_html
+        try:
+            print("    ! Trying jina mirror fallback...")
+            jina_text = _fetch_via_jina_mirror(url)
+            return jina_text
+        except Exception:
+            pass
+        raise requests.HTTPError(
+            f"403 Bot challenge could not be bypassed: {url}",
+            response=resp,
+        )
+
     if min_length > 0 and len(html) < min_length:
         pw_html = _fetch_with_playwright(url)
         if pw_html and len(pw_html) > len(html):
@@ -245,7 +353,72 @@ def collect_committee_links(home_url: str, html: str) -> List[str]:
         if link not in seen:
             seen.add(link)
             out.append(link)
+    if out:
+        return out[:3]
+
+    # If no clickable links were found (e.g., mirror markdown / anti-bot),
+    # derive a few conservative committee URL candidates from the site root.
+    parsed = urlparse(home_url)
+    if not parsed.scheme or not parsed.netloc:
+        return out[:3]
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    site_key = parsed.netloc.split(".")[0].lower()
+    candidates = [
+        f"{base}/index.php/{site_key}-committee/",
+        f"{base}/index.php/committee/",
+        f"{base}/committee/",
+        f"{base}/committees/",
+        f"{base}/organizing-committee/",
+    ]
+    for cand in candidates:
+        if cand not in seen:
+            seen.add(cand)
+            out.append(cand)
     return out[:3]
+
+
+def _regex_extract_chairs_from_text(text: str, max_chairs: int = 8) -> List[Dict]:
+    """Fallback extractor for markdown/plain-text committee pages when Claude returns empty."""
+    if not text:
+        return []
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    role_tokens = (
+        "general chair",
+        "conference chair",
+        "program chair",
+        "tpc chair",
+        "technical program chair",
+        "organizing chair",
+        "steering committee",
+    )
+    name_pat = re.compile(
+        r"(?:\bProf\.|\bDr\.|\bAssoc\. Prof\.|\bAsst\. Prof\.)\s*\[?([A-Z][A-Za-z\-\s'.]{2,80})\]?"
+    )
+    chairs: List[Dict] = []
+    seen = set()
+    for i, line in enumerate(lines):
+        low = line.lower()
+        if not any(tok in low for tok in role_tokens):
+            continue
+        window = " ".join(lines[i : i + 3])
+        for m in name_pat.finditer(window):
+            name = (m.group(1) or "").strip(" ,.;:")
+            if not name:
+                continue
+            key = normalize_name(name)
+            if key in seen:
+                continue
+            seen.add(key)
+            chairs.append(
+                {
+                    "chair_name": name,
+                    "chair_affiliation": "",
+                    "chair_email": "",
+                }
+            )
+            if len(chairs) >= max_chairs:
+                return chairs
+    return chairs
 
 
 def extract_from_committee_page(client, conference_name: str, html: str) -> List[Dict]:
@@ -278,7 +451,15 @@ Page text:
 {snippet}
 """
     data = ask_claude_json(client, prompt)
-    return data.get("chairs", []) if isinstance(data, dict) else []
+    chairs = data.get("chairs", []) if isinstance(data, dict) else []
+    if any((c.get("chair_name", "") or "").strip() for c in chairs):
+        return chairs
+    # Claude occasionally returns empty on markdown-heavy committee pages.
+    regex_chairs = _regex_extract_chairs_from_text(snippet)
+    if regex_chairs:
+        print(f"    ! Regex fallback extracted {len(regex_chairs)} chair(s)")
+        return regex_chairs
+    return chairs
 
 
 def get_openai_client():
@@ -355,6 +536,8 @@ Rules:
         return (email, confidence)
     except Exception as e:
         print(f"    ! OpenAI web search failed: {e}")
+        if is_connection_error(e):
+            raise RuntimeError(f"OpenAI connection error: {e}") from e
         return ("", "")
 
 
@@ -419,6 +602,8 @@ Rules:
         return chairs
     except Exception as e:
         print(f"    ! OpenAI chair search failed: {e}")
+        if is_connection_error(e):
+            raise RuntimeError(f"OpenAI connection error: {e}") from e
         return []
 
 

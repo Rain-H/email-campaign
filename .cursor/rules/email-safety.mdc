@@ -13,7 +13,8 @@ alwaysApply: true
 
 ## Rule 2: Never use production email lists
 
-- NEVER use `crawled_conferences_v2.json` or `crawled_conferences_v2.csv` as email recipients unless the user explicitly tells you to use those specific files
+- Any data file other than `test_data.csv` is considered production data (e.g. `crawled_conferences_v3.json`, `crawled_edas.json`, `edas_first80.json`, or any future crawl output)
+- NEVER use production data files as email recipients unless the user explicitly specifies the file
 - Default data source is `test_data.csv`
 - If the user says "send emails" without specifying a data source, always use `test_data.csv`
 
