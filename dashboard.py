@@ -20,7 +20,21 @@ st.set_page_config(
 )
 
 
-@st.cache(ttl=300, allow_output_mutation=True)
+# Cold email industry benchmarks (2026 snapshot).
+# Sources:
+#   - b2bdataindex.com/benchmarks/cold-email-2026/
+#   - mailshake.com/blog/cold-email-benchmarks-2026/
+#   - prospeo.io/s/cold-email-click-through-rate
+# Update once a year.
+BENCHMARKS = {
+    "open_rate":   {"median": 22.0, "tech": 26.0},
+    "click_rate":  {"median": 3.0,  "tech": 3.0},
+    "reply_rate":  {"median": 4.0,  "tech": 5.0},
+    "bounce_rate": {"target": 2.0},
+}
+
+
+@st.cache_data(ttl=300)
 def get_weekly_data(num_weeks: int = 12):
     """获取最近 N 周的数据"""
     conn = get_connection()
@@ -43,12 +57,24 @@ def get_weekly_data(num_weeks: int = 12):
         week_start = start_of_week1 + timedelta(weeks=week - 1)
         week_end = week_start + timedelta(days=6, hours=23, minutes=59, seconds=59)
         
-        # 发送数
+        # 发送数 (按每个 contact 的第几封邮件区分 new vs follow-up)
+        # ROW_NUMBER() 给每封邮件按 contact + sent_at 排序，seq=1 是初次邮件，seq>1 是 follow-up
         cur.execute("""
-            SELECT COUNT(*) FROM emails
+            WITH ranked AS (
+                SELECT id, sent_at,
+                       ROW_NUMBER() OVER (PARTITION BY contact_email ORDER BY sent_at) AS seq
+                FROM emails
+            )
+            SELECT
+                COALESCE(SUM(CASE WHEN seq = 1 THEN 1 ELSE 0 END), 0) AS new_sent,
+                COALESCE(SUM(CASE WHEN seq > 1 THEN 1 ELSE 0 END), 0) AS followup_sent
+            FROM ranked
             WHERE sent_at >= %s AND sent_at <= %s
         """, (week_start, week_end))
-        sent = cur.fetchone()[0]
+        row = cur.fetchone()
+        new_sent = row[0]
+        followup_sent = row[1]
+        sent = new_sent + followup_sent
         
         # 回复数
         cur.execute("""
@@ -71,6 +97,8 @@ def get_weekly_data(num_weeks: int = 12):
             "year": year,
             "week_start": week_start.strftime("%m/%d"),
             "sent": sent,
+            "new_sent": new_sent,
+            "followup_sent": followup_sent,
             "replies": replies,
             "interested": interested,
         })
@@ -81,7 +109,7 @@ def get_weekly_data(num_weeks: int = 12):
     return list(reversed(weeks))
 
 
-@st.cache(ttl=300, allow_output_mutation=True)
+@st.cache_data(ttl=300)
 def get_total_stats():
     """获取总计统计"""
     conn = get_connection()
@@ -92,6 +120,22 @@ def get_total_stats():
     
     cur.execute("SELECT COUNT(*) FROM emails")
     total_sent = cur.fetchone()[0]
+
+    # New vs Follow-up 拆分：每个 contact 的第 1 封邮件 = new，第 2+ 封 = follow-up
+    cur.execute("""
+        WITH ranked AS (
+            SELECT id,
+                   ROW_NUMBER() OVER (PARTITION BY contact_email ORDER BY sent_at) AS seq
+            FROM emails
+        )
+        SELECT
+            COALESCE(SUM(CASE WHEN seq = 1 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN seq > 1 THEN 1 ELSE 0 END), 0)
+        FROM ranked
+    """)
+    row = cur.fetchone()
+    total_new_sent = row[0]
+    total_followup_sent = row[1]
 
     cur.execute("SELECT COUNT(*) FROM emails WHERE delivered_at IS NOT NULL")
     total_delivered = cur.fetchone()[0]
@@ -120,6 +164,8 @@ def get_total_stats():
     return {
         "contacts": total_contacts,
         "sent": total_sent,
+        "new_sent": total_new_sent,
+        "followup_sent": total_followup_sent,
         "delivered": total_delivered,
         "opened": total_opened,
         "clicked": total_clicked,
@@ -130,7 +176,7 @@ def get_total_stats():
     }
 
 
-@st.cache(ttl=300, allow_output_mutation=True)
+@st.cache_data(ttl=300)
 def get_recent_replies(limit: int = 10):
     """获取最近的回复"""
     conn = get_connection()
@@ -160,7 +206,7 @@ def get_recent_replies(limit: int = 10):
     ]
 
 
-@st.cache(ttl=300, allow_output_mutation=True)
+@st.cache_data(ttl=300)
 def get_platform_stats():
     conn = get_connection()
     cur = conn.cursor()
@@ -186,7 +232,7 @@ def get_platform_stats():
     return sent_data, reply_data
 
 
-@st.cache(ttl=300, allow_output_mutation=True)
+@st.cache_data(ttl=300)
 def get_interested_contacts():
     conn = get_connection()
     cur = conn.cursor()
@@ -212,30 +258,53 @@ def main():
     col_refresh, col_spacer = st.columns([1, 5])
     with col_refresh:
         if st.button("🔄 Refresh"):
-            st.caching.clear_cache()
+            st.cache_data.clear()
             st.rerun()
     
     # 总计统计卡片
     st.markdown("---")
     total = get_total_stats()
     
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    # 7 列：Sent / Bounced / Open Rate / Click Rate / Replies / Reply Rate / Interested
+    col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
     reply_rate = (total['replies'] / total['sent'] * 100) if total['sent'] > 0 else 0
     open_rate = (total['opened'] / total['sent'] * 100) if total['sent'] > 0 else 0
+    click_rate = (total['clicked'] / total['sent'] * 100) if total['sent'] > 0 else 0
     bounce_rate = (total['bounced'] / total['sent'] * 100) if total['sent'] > 0 else 0
+    interest_share = (total['interested'] / total['replies'] * 100) if total['replies'] > 0 else 0
+
+    bm = BENCHMARKS
 
     with col1:
         st.metric("📤 Sent", f"{total['sent']:,}")
+        st.caption(f"New: {total['new_sent']:,} · Follow-up: {total['followup_sent']:,}")
     with col2:
         st.metric("📭 Bounced", f"{total['bounced']:,}", delta=f"-{bounce_rate:.1f}%", delta_color="inverse")
+        st.caption(f"Industry target < {bm['bounce_rate']['target']:.0f}% · You {bounce_rate:.1f}%")
     with col3:
         st.metric("👁 Open Rate", f"{open_rate:.1f}%", f"{total['opened']:,} opened")
+        st.caption(
+            f"Industry median {bm['open_rate']['median']:.0f}% · "
+            f"⚠ inflated by Apple Mail Privacy Protection — see Click Rate"
+        )
     with col4:
-        st.metric("📬 Replies", f"{total['replies']:,}")
+        st.metric("🖱 Click Rate", f"{click_rate:.1f}%", f"{total['clicked']:,} clicked")
+        st.caption(
+            f"Industry median {bm['click_rate']['median']:.0f}% · "
+            f"You {click_rate - bm['click_rate']['median']:+.1f}pp (real engagement signal)"
+        )
     with col5:
-        st.metric("📊 Reply Rate", f"{reply_rate:.1f}%")
+        st.metric("📬 Replies", f"{total['replies']:,}")
+        st.caption(f"{total['interested']:,} interested of {total['replies']:,}")
     with col6:
+        st.metric("📊 Reply Rate", f"{reply_rate:.1f}%")
+        st.caption(
+            f"Industry median {bm['reply_rate']['median']:.0f}% (Tech {bm['reply_rate']['tech']:.0f}%) · "
+            f"You {reply_rate - bm['reply_rate']['median']:+.1f}pp"
+        )
+    with col7:
         st.metric("✅ Interested", f"{total['interested']:,}")
+        st.caption(f"{interest_share:.0f}% of replies")
     
     st.markdown("---")
     
@@ -253,15 +322,23 @@ def main():
         fig1 = go.Figure()
         fig1.add_trace(go.Bar(
             x=df["week"],
-            y=df["sent"],
-            name="Sent",
-            marker_color="#4CAF50"
+            y=df["new_sent"],
+            name="New",
+            marker_color="#4CAF50",
+        ))
+        fig1.add_trace(go.Bar(
+            x=df["week"],
+            y=df["followup_sent"],
+            name="Follow-up",
+            marker_color="#90A4AE",
         ))
         fig1.update_layout(
-            title="Weekly Sent",
+            title="Weekly Sent (New vs Follow-up)",
             xaxis_title="Week",
             yaxis_title="Count",
             height=350,
+            barmode="group",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
         st.plotly_chart(fig1, use_container_width=True)
     
@@ -342,8 +419,8 @@ def main():
 
     with col_weekly:
         st.subheader("📊 Weekly Breakdown")
-        df_display = df[["week", "week_start", "sent", "replies", "interested"]].copy()
-        df_display.columns = ["Week", "Start Date", "Sent", "Replies", "Interested"]
+        df_display = df[["week", "week_start", "new_sent", "followup_sent", "sent", "replies", "interested"]].copy()
+        df_display.columns = ["Week", "Start", "New", "Follow-up", "Sent", "Replies", "Interested"]
         st.dataframe(df_display)
 
 

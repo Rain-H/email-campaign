@@ -1,0 +1,7 @@
+# Streamlit Community Cloud deployment dependencies (subset of requirements.txt).
+# Keep minimal to speed up builds and stay under the 1 GB image limit.
+streamlit>=1.32.0
+plotly>=5.18.0
+pandas>=2.0.0
+psycopg2-binary>=2.9.0
+python-dotenv>=1.0.0

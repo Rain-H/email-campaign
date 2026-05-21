@@ -27,6 +27,13 @@ def _is_test_mode():
 def get_connection(use_test_db=False):
     """返回 PostgreSQL 数据库连接。
 
+    Connection source priority:
+      1. DATABASE_URL env var (Streamlit Cloud / Neon convention) — used only
+         for production. Ignored in test mode so test runs never touch prod.
+      2. Discrete PG_HOST / PG_PORT / PG_USER / PG_PASSWORD / PG_DATABASE
+         env vars (local dev). Adds sslmode=require automatically for any
+         non-localhost host.
+
     When use_test_db=True or env var USE_TEST_DB=1, connects to the test
     database (PG_DATABASE_TEST) instead of the production database.
     """
@@ -38,15 +45,22 @@ def get_connection(use_test_db=False):
             "pip install psycopg2-binary"
         )
 
-    db_name = PG_DATABASE_TEST if (use_test_db or _is_test_mode()) else PG_DATABASE
-    conn = psycopg2.connect(
+    test_mode = use_test_db or _is_test_mode()
+
+    db_url = os.getenv("DATABASE_URL")
+    if db_url and not test_mode:
+        return psycopg2.connect(db_url)
+
+    db_name = PG_DATABASE_TEST if test_mode else PG_DATABASE
+    sslmode = "disable" if PG_HOST in ("localhost", "127.0.0.1") else "require"
+    return psycopg2.connect(
         host=PG_HOST,
         port=PG_PORT,
         database=db_name,
         user=PG_USER,
-        password=PG_PASSWORD
+        password=PG_PASSWORD,
+        sslmode=sslmode,
     )
-    return conn
 
 
 def get_schema_path():
