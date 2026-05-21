@@ -5,11 +5,26 @@ Email Campaign Dashboard
 Run with: streamlit run dashboard.py
 """
 
+import os
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+
+# Bridge Streamlit Cloud secrets into os.environ BEFORE importing db_config,
+# because get_connection() reads DATABASE_URL via os.getenv. Streamlit
+# Cloud only populates st.secrets, not the process environment. On local
+# dev, .env handles it and st.secrets is absent — wrapped in try/except
+# so missing secrets.toml doesn't crash local runs.
+try:
+    for _key in ("DATABASE_URL",):
+        if _key in st.secrets and not os.environ.get(_key):
+            os.environ[_key] = st.secrets[_key]
+except Exception:
+    pass
+
 from database.db_config import get_connection
 
 
