@@ -24,3 +24,26 @@ _*.csv
 
 # HTML debug snapshots
 *.html
+
+# Cursor debug logs
+.cursor/debug-*.log
+
+# launchd / cron run logs
+logs/
+
+# Crawl / contact data (local only — regenerable from crawlers + CRM)
+contacts_*.csv
+contacts_*.json
+crawled_*.csv
+crawled_*.json
+seed_*.json
+edas_raw.json
+followup_candidates.csv
+followup_*_pending.csv
+followup_first_candidates_*.csv
+followup_first_candidates_*.json
+followup1_pending_by_date.csv
+replied_from_firstsend_*.csv
+contacts_*_unsent_*.csv
+unsent_chairs.csv
+replies_review.txt

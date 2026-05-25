@@ -42,26 +42,6 @@ DEFAULT_RAW_OUTPUT = "edas_raw.json"
 DEFAULT_OUTPUT = "contacts_edas.json"
 DEFAULT_CSV_OUTPUT = "contacts_edas.csv"
 
-DEBUG_LOG_PATH = "/Users/yuhan/email campaign/.cursor/debug-047c54.log"
-DEBUG_SESSION_ID = "047c54"
-
-
-def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: Dict):
-    try:
-        payload = {
-            "sessionId": DEBUG_SESSION_ID,
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-
 
 # ── Stage 1: EDAS metadata scrape ──────────────────────────────────
 
@@ -300,17 +280,7 @@ def run_stage2(input_path: str, output_path: str, csv_output_path: str,
         short = conf["conference_short_name"]
         full = conf["conference_full_name"]
         url = conf.get("conference_url", "")
-        run_id = f"stage2_retry_{int(time.time())}"
         print(f"\n[{idx}/{len(to_process)}] {short}: {url or '(no URL)'}")
-        # region agent log
-        _debug_log(
-            run_id,
-            "H4",
-            "crawl_edas.py:run_stage2:conference_start",
-            "Conference processing started",
-            {"short": short, "full": full, "url": url},
-        )
-        # endregion
 
         chairs = []
         try:
@@ -321,68 +291,15 @@ def run_stage2(input_path: str, output_path: str, csv_output_path: str,
                 try:
                     homepage_html = fetch_url(url, min_length=500)
                     committee_links = collect_committee_links(url, homepage_html)
-                    # region agent log
-                    _debug_log(
-                        run_id,
-                        "H1",
-                        "crawl_edas.py:run_stage2:committee_links",
-                        "Homepage fetched and committee links discovered",
-                        {
-                            "short": short,
-                            "url": url,
-                            "homepage_len": len(homepage_html or ""),
-                            "links_count": len(committee_links),
-                            "links_sample": committee_links[:5],
-                            "homepage_has_committee_token": ("committee" in (homepage_html or "").lower()),
-                        },
-                    )
-                    # endregion
                     for link in committee_links:
                         try:
                             page_html = fetch_url(link, min_length=500)
                             page_chairs = extract_from_committee_page(client, full or short, page_html)
                             chairs = merge_chairs(chairs, page_chairs)
-                            # region agent log
-                            _debug_log(
-                                run_id,
-                                "H3",
-                                "crawl_edas.py:run_stage2:extract_committee_page",
-                                "Committee page extracted",
-                                {
-                                    "short": short,
-                                    "link": link,
-                                    "page_len": len(page_html or ""),
-                                    "extracted_count": len(page_chairs or []),
-                                    "merged_count": len(chairs or []),
-                                },
-                            )
-                            # endregion
                         except Exception:
-                            # region agent log
-                            _debug_log(
-                                run_id,
-                                "H2",
-                                "crawl_edas.py:run_stage2:committee_page_error",
-                                "Committee page fetch/extract failed and was skipped",
-                                {
-                                    "short": short,
-                                    "link": link,
-                                    "error": "committee_page_error_swallowed",
-                                },
-                            )
-                            # endregion
                             continue
                 except Exception as e:
                     print(f"  ! Website fetch failed: {e}")
-                    # region agent log
-                    _debug_log(
-                        run_id,
-                        "H2",
-                        "crawl_edas.py:run_stage2:website_fetch_error",
-                        "Homepage fetch failed",
-                        {"short": short, "url": url, "error": str(e)},
-                    )
-                    # endregion
                     if is_connection_error(e):
                         raise CrawlConnectionError(
                             f"Connection error while fetching conference site: {short} ({url})"
@@ -390,30 +307,8 @@ def run_stage2(input_path: str, output_path: str, csv_output_path: str,
 
             # Step 2: OpenAI web search fallback if no chairs found
             if not any(c.get("chair_name", "").strip() for c in chairs):
-                # region agent log
-                _debug_log(
-                    run_id,
-                    "H1",
-                    "crawl_edas.py:run_stage2:fallback_triggered",
-                    "No chairs from website; fallback to OpenAI",
-                    {"short": short, "url": url, "chairs_count_before_fallback": len(chairs or [])},
-                )
-                # endregion
                 print(f"  → No chairs from website, trying OpenAI web search...")
                 web_chairs = openai_web_search_chairs(openai_client, short, full, url)
-                # region agent log
-                _debug_log(
-                    run_id,
-                    "H5",
-                    "crawl_edas.py:run_stage2:openai_fallback_result",
-                    "OpenAI fallback finished",
-                    {
-                        "short": short,
-                        "url": url,
-                        "openai_chairs_count": len(web_chairs or []),
-                    },
-                )
-                # endregion
                 if web_chairs:
                     chairs = web_chairs
                     print(f"  ✓ OpenAI found {len(web_chairs)} chair(s)")

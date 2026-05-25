@@ -18,7 +18,7 @@ POSTMARK_API_URL = "https://api.postmarkapp.com/email"
 
 # ---------- template ----------
 
-def load_template(path="email-template.md"):
+def load_template(path="email-template-v5.md"):
     with open(path, "r") as f:
         lines = f.readlines()
     # First line is subject
@@ -156,7 +156,13 @@ _SKIP_EMAIL_PREFIXES = (
 
 
 def _deduplicate_and_filter(raw_rows):
-    """Deduplicate by email, skip empty/bad emails and empty names."""
+    """Deduplicate by email, skip empty/bad emails and empty names.
+
+    Applies the shared strict validator (masked, compound, placeholder, malformed)
+    plus this script's role-account prefix filter (noreply/admin/info/…).
+    """
+    from database.crm_db import is_valid_email as _strict_is_valid_email
+
     recipients = []
     seen = set()
     for row in raw_rows:
@@ -166,6 +172,10 @@ def _deduplicate_and_filter(raw_rows):
         if not email or not name:
             continue
         if email.lower() in seen:
+            continue
+        ok, reason = _strict_is_valid_email(email)
+        if not ok:
+            print(f"  [SKIP] invalid email '{email}' ({reason})")
             continue
         if any(email.lower().startswith(p) for p in _SKIP_EMAIL_PREFIXES):
             continue
@@ -260,7 +270,12 @@ def send_email(recipient, subject, plain_body, html_body, dry_run=True):
         return result
 
     try:
-        resp = requests.post(
+        # Use a Session with trust_env=False to bypass any proxy env vars that
+        # may be set by .env (e.g. HTTP_PROXY=http://127.0.0.1:7892). Postmark
+        # is publicly reachable; routing through a local proxy is never wanted.
+        _session = requests.Session()
+        _session.trust_env = False
+        resp = _session.post(
             POSTMARK_API_URL,
             headers={
                 "Accept": "application/json",
@@ -278,7 +293,6 @@ def send_email(recipient, subject, plain_body, html_body, dry_run=True):
                 "TrackLinks": "HtmlOnly",
             },
             timeout=30,
-            proxies={"http": None, "https": None},
         )
         data = resp.json()
         if resp.status_code == 200 and data.get("ErrorCode") == 0:
@@ -304,7 +318,7 @@ def main():
                         help="Actually send emails (without this flag, does a dry run)")
     parser.add_argument("--limit", type=int, default=0,
                         help="Limit number of emails to send (0 = no limit)")
-    parser.add_argument("--template", default="email-template.md",
+    parser.add_argument("--template", default="email-template-v5.md",
                         help="Path to email template file")
     parser.add_argument("--test", action="store_true",
                         help="Use test database (crm_test) instead of production")
@@ -372,7 +386,10 @@ def main():
 
         if not dry_run:
             status = result.get("status", "?")
-            print(f"  [{i+1}/{len(recipients)}] {r['chair_email']:40s} {status}")
+            extra = ""
+            if status == "error":
+                extra = f"  ERR_CODE={result.get('error_code')!r}  ERR_MSG={result.get('error_message','')[:200]!r}"
+            print(f"  [{i+1}/{len(recipients)}] {r['chair_email']:40s} {status}{extra}", flush=True)
             if i < len(recipients) - 1:
                 time.sleep(0.5)
 

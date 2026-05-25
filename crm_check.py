@@ -139,8 +139,17 @@ def sync_postmark_for_contact(conn, contact: Dict) -> bool:
     return changed
 
 
-def sync_postmark(conn) -> int:
-    """Check Postmark API for all contacts. Returns count of updated contacts."""
+def sync_postmark_per_contact(conn, start_from: int = 0, commit_every: int = 50) -> int:
+    """Per-contact Postmark sync (3 API calls per contact). Slow but kept as fallback.
+
+    Use this when bulk sync isn't suitable (e.g., debugging a single contact's status,
+    or when you only need to sync a subset starting from a known index).
+
+    Args:
+        start_from: 0-based index to start from (skip the first N contacts).
+                    Useful for resuming after an interrupted run.
+        commit_every: Commit to DB every N contacts so partial progress is persisted.
+    """
     from database.crm_db import get_contacts_for_sync
 
     if not POSTMARK_SERVER_TOKEN:
@@ -148,20 +157,210 @@ def sync_postmark(conn) -> int:
         return 0
 
     contacts = get_contacts_for_sync(conn)
-    updated = 0
     total = len(contacts)
 
-    for i, contact in enumerate(contacts):
+    if start_from < 0:
+        start_from = 0
+    if start_from >= total:
+        print(f"  start_from={start_from} >= total {total}, nothing to do.")
+        return 0
+    if start_from > 0:
+        print(f"  Resuming from index {start_from} (skipping first {start_from} of {total}).")
+
+    updated = 0
+    for i in range(start_from, total):
+        contact = contacts[i]
         if sync_postmark_for_contact(conn, contact):
             updated += 1
         if i < total - 1:
             time.sleep(0.3)
         if (i + 1) % 10 == 0 or i == total - 1:
             print(f"    Checked {i+1}/{total} contacts...")
+        if (i + 1) % commit_every == 0:
+            conn.commit()
 
     conn.commit()
     print(f"  {updated} contact(s) updated from Postmark.")
     return updated
+
+
+def _paginate_postmark(endpoint: str, params: Optional[Dict] = None,
+                       page_size: int = 500, results_key: str = "Messages") -> List[Dict]:
+    """Generator-style helper to paginate a Postmark bulk endpoint.
+
+    Yields each page's items list. Stops when:
+      - empty page is returned
+      - we've collected TotalCount items
+      - an HTTP error occurs
+    """
+    params = dict(params or {})
+    params["count"] = page_size
+    offset = 0
+    while True:
+        params["offset"] = offset
+        try:
+            resp = requests.get(
+                f"{POSTMARK_API}{endpoint}",
+                headers=postmark_headers(),
+                params=params,
+                timeout=30,
+            )
+        except Exception as e:
+            print(f"    Warning: {endpoint} page offset={offset}: {e}")
+            return
+        if resp.status_code != 200:
+            print(f"    Warning: {endpoint} HTTP {resp.status_code}: {resp.text[:200]}")
+            return
+        data = resp.json()
+        items = data.get(results_key, [])
+        total = data.get("TotalCount", 0)
+        if not items:
+            return
+        yield items, offset + len(items), total
+        offset += len(items)
+        if offset >= total or len(items) < page_size:
+            return
+
+
+def sync_postmark_bulk(conn, from_date: Optional[str] = None,
+                       page_size: int = 500) -> int:
+    """Bulk Postmark sync using batch endpoints. Returns count of updated contacts.
+
+    Replaces per-contact sync (3 API calls × N contacts = thousands of calls) with
+    a handful of paginated bulk calls. Typically completes in 1-2 minutes for ~3000
+    contacts vs hours for per-contact mode.
+
+    Args:
+        from_date: Optional 'YYYY-MM-DD' to limit bulk queries to messages on/after
+                   this date. Greatly reduces pages fetched when the Postmark account
+                   has unrelated messages (product emails, support tickets, etc.).
+        page_size: Page size for each bulk endpoint (Postmark max is 500).
+    """
+    from database.crm_db import (
+        get_contacts_for_sync, update_delivery, update_bounce,
+        update_open, update_click,
+    )
+
+    if not POSTMARK_SERVER_TOKEN:
+        print("  POSTMARK_SERVER_TOKEN not set, skipping.")
+        return 0
+
+    contacts = get_contacts_for_sync(conn)
+    our_msg_ids = {c["postmark_message_id"] for c in contacts if c.get("postmark_message_id")}
+    if not our_msg_ids:
+        print("  No tracked messages found, nothing to sync.")
+        return 0
+
+    common_params: Dict = {}
+    if from_date:
+        common_params["fromdate"] = from_date
+        print(f"  Bulk sync for {len(our_msg_ids)} tracked messages (fromdate={from_date})...")
+    else:
+        print(f"  Bulk sync for {len(our_msg_ids)} tracked messages...")
+
+    updated_ids: set = set()
+
+    # 1. Message status (Sent/Processed -> delivered; Bounced flagged here, details from /bounces below)
+    print("    [1/4] /messages/outbound (status & delivery)...")
+    pages = 0
+    for items, fetched, total in _paginate_postmark(
+        "/messages/outbound", common_params, page_size, results_key="Messages"
+    ):
+        pages += 1
+        for m in items:
+            msg_id = m.get("MessageID")
+            if msg_id not in our_msg_ids:
+                continue
+            status = m.get("Status", "")
+            received_at = m.get("ReceivedAt", "")
+            if status in ("Sent", "Processed"):
+                update_delivery(conn, msg_id, received_at)
+                updated_ids.add(msg_id)
+        print(f"      page {pages}: scanned {fetched}/{total}")
+    conn.commit()
+
+    # 2. Bounces (gives BouncedAt + Type)
+    print("    [2/4] /bounces (bounce details)...")
+    pages = 0
+    for items, fetched, total in _paginate_postmark(
+        "/bounces", common_params, page_size, results_key="Bounces"
+    ):
+        pages += 1
+        for b in items:
+            msg_id = b.get("MessageID")
+            if msg_id not in our_msg_ids:
+                continue
+            bounced_at = b.get("BouncedAt", "")
+            bounce_type = b.get("Type", "unknown")
+            update_bounce(conn, msg_id, bounced_at, bounce_type)
+            updated_ids.add(msg_id)
+        print(f"      page {pages}: scanned {fetched}/{total}")
+    conn.commit()
+
+    # 3. Opens (aggregate count + earliest timestamp per message)
+    print("    [3/4] /messages/outbound/opens...")
+    opens_by_msg: Dict[str, List[str]] = {}
+    pages = 0
+    for items, fetched, total in _paginate_postmark(
+        "/messages/outbound/opens", common_params, page_size, results_key="Opens"
+    ):
+        pages += 1
+        for o in items:
+            msg_id = o.get("MessageID")
+            if msg_id not in our_msg_ids:
+                continue
+            ts = o.get("ReceivedAt", "")
+            if ts:
+                opens_by_msg.setdefault(msg_id, []).append(ts)
+        print(f"      page {pages}: scanned {fetched}/{total}")
+    for msg_id, ts_list in opens_by_msg.items():
+        # Earliest timestamp = first open (ISO 8601 sorts lexicographically)
+        first_open = min(ts_list)
+        update_open(conn, msg_id, first_open, len(ts_list))
+        updated_ids.add(msg_id)
+    conn.commit()
+
+    # 4. Clicks (earliest timestamp per message)
+    print("    [4/4] /messages/outbound/clicks...")
+    clicks_by_msg: Dict[str, str] = {}
+    pages = 0
+    for items, fetched, total in _paginate_postmark(
+        "/messages/outbound/clicks", common_params, page_size, results_key="Clicks"
+    ):
+        pages += 1
+        for c in items:
+            msg_id = c.get("MessageID")
+            if msg_id not in our_msg_ids:
+                continue
+            ts = c.get("ReceivedAt", "")
+            if not ts:
+                continue
+            if msg_id not in clicks_by_msg or ts < clicks_by_msg[msg_id]:
+                clicks_by_msg[msg_id] = ts
+        print(f"      page {pages}: scanned {fetched}/{total}")
+    for msg_id, ts in clicks_by_msg.items():
+        update_click(conn, msg_id, ts)
+        updated_ids.add(msg_id)
+    conn.commit()
+
+    print(f"  {len(updated_ids)} contact(s) updated from Postmark.")
+    return len(updated_ids)
+
+
+def sync_postmark(conn, *, bulk: bool = True, from_date: Optional[str] = None,
+                  start_from: int = 0, commit_every: int = 50) -> int:
+    """Postmark sync dispatcher. Defaults to fast bulk mode; falls back to per-contact.
+
+    Args:
+        bulk: When True (default), use the bulk-API path. When False, use the
+              per-contact path (slow but supports --start-from resume).
+        from_date: 'YYYY-MM-DD' filter for bulk mode.
+        start_from: 0-based start index for per-contact mode.
+        commit_every: Commit cadence for per-contact mode.
+    """
+    if bulk:
+        return sync_postmark_bulk(conn, from_date=from_date)
+    return sync_postmark_per_contact(conn, start_from=start_from, commit_every=commit_every)
 
 
 # ====================================================================
@@ -646,6 +845,15 @@ def main():
     parser.add_argument("--since-days", type=int, default=30, help="IMAP search window (days)")
     parser.add_argument("--export-json", action="store_true", help="Export DB to crm.json after sync")
     parser.add_argument("--test", action="store_true", help="Use test database (crm_test) instead of production")
+    parser.add_argument("--per-contact", action="store_true",
+                        help="Use the slow per-contact Postmark sync instead of the default bulk-API mode")
+    parser.add_argument("--from-date", type=str, default=None,
+                        help="Bulk-mode only: limit Postmark queries to messages on/after YYYY-MM-DD "
+                             "(default: 120 days before today)")
+    parser.add_argument("--start-from", type=int, default=0,
+                        help="Per-contact mode only: resume from this 0-based contact index")
+    parser.add_argument("--commit-every", type=int, default=50,
+                        help="Per-contact mode only: commit to DB every N contacts (default: 50)")
     args = parser.parse_args()
 
     if args.test:
@@ -667,7 +875,16 @@ def main():
     # Step 1: Postmark status sync
     if full_sync or args.postmark_only:
         print("\n[Step 1] Checking Postmark delivery/open/click status...")
-        sync_postmark(conn)
+        from_date = args.from_date
+        if not args.per_contact and from_date is None:
+            from_date = (datetime.utcnow() - timedelta(days=120)).strftime("%Y-%m-%d")
+        sync_postmark(
+            conn,
+            bulk=not args.per_contact,
+            from_date=from_date,
+            start_from=args.start_from,
+            commit_every=args.commit_every,
+        )
 
     # Step 2: IMAP reply detection
     if full_sync or args.replies_only:

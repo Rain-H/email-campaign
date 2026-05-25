@@ -107,14 +107,33 @@ def deobfuscate_email(email: str) -> str:
 
 
 def is_valid_email(email: str) -> bool:
+    """Return True iff `email` looks like a real, useful chair contact.
+
+    Two-stage filter:
+      1. Strict syntactic / placeholder check delegated to `database.crm_db`
+         (single source of truth shared with the DB write path).
+      2. Crawler-specific role-account filter (noreply/admin/info/…).
+
+    Stage 1 rejections are logged because they usually indicate either a bug
+    in the crawler (masked or compound addresses) or new placeholder patterns
+    we should know about. Stage 2 rejections are silent (very common).
+    """
     if not email:
         return False
-    email = deobfuscate_email(email).strip().lower()
-    if "@" not in email:
+    deobfuscated = deobfuscate_email(email).strip()
+    if not deobfuscated:
         return False
-    if any(email.startswith(p) for p in BAD_EMAIL_PREFIXES):
+
+    from database.crm_db import is_valid_email as _strict_is_valid_email
+    strict_ok, strict_reason = _strict_is_valid_email(deobfuscated)
+    if not strict_ok:
+        print(f"  [SKIP] invalid email '{email}' ({strict_reason})")
         return False
-    domain = email.split("@", 1)[1]
+
+    email_lower = deobfuscated.lower()
+    if any(email_lower.startswith(p) for p in BAD_EMAIL_PREFIXES):
+        return False
+    domain = email_lower.split("@", 1)[1]
     if domain in BAD_EMAIL_DOMAINS:
         return False
     return True

@@ -12,8 +12,9 @@ Send a personalized follow-up to conference chairs who received the initial cold
 ## Prerequisites
 
 - Initial campaign emails already sent (via `send_postmark.py`)
-- CRM status synced at least once (`crm_check.py`) so delivery/bounce data is current
-- **Postmark API key**: `POSTMARK_SERVER_TOKEN` in `.env`
+- PostgreSQL CRM database is the **single source of truth** — candidate selection reads `contact_status` view directly; do not query Postmark for eligibility
+- The database is assumed to be reasonably fresh (synced on a separate routine by `crm_check.py`); no on-demand sync is required as part of this workflow
+- **Postmark API key**: `POSTMARK_SERVER_TOKEN` in `.env` (used only to send the follow-up, not to select recipients)
 - **Sender email**: `POSTMARK_SENDER_EMAIL` in `.env`
 - **Python packages**: `requests`, `python-dotenv`, `psycopg2`
 
@@ -27,6 +28,8 @@ The script reads the original email's subject from the database, then:
 No `In-Reply-To` or `References` headers are set — the follow-up arrives as a separate email, not in the original thread.
 
 ## Target Audience
+
+Eligibility is computed **entirely from the database** (`contact_status` view + `emails` table). The script does not consult Postmark to decide who to follow up with.
 
 Contacts with these statuses are eligible for follow-up:
 
@@ -44,7 +47,7 @@ Contacts with these statuses are **excluded**:
 | `replied_interested` | Already engaged |
 | `replied_not_interested` | Already declined |
 
-Contacts who have already received a follow-up email are also excluded (deduplication via email count in DB).
+Contacts who have already received a follow-up email are also excluded (deduplication via email count in DB: `(SELECT COUNT(*) FROM emails WHERE contact_email = cs.email) = 1`).
 
 ## Email Templates
 
@@ -91,25 +94,19 @@ python send_followup.py --test
 
 ## Workflow
 
-### Step 1: Sync CRM status first
+### Step 1: Dry run from the database (always do this first)
 
-Before running follow-ups, ensure CRM data is current:
-
-```bash
-PYTHONUNBUFFERED=1 python crm_check.py
-```
-
-This updates delivery, open, click, and reply status so the candidate list is accurate.
-
-### Step 2: Dry run (always do this first)
+Candidate selection is read straight from the database — no Postmark fetch is required here. Assume the user keeps the DB fresh via their own routine.
 
 ```bash
 python send_followup.py --min-days 5
 ```
 
-Review the output — it shows each contact's email, name, conference, the `Fwd:` subject, and a preview of the full body (follow-up note + forwarded original).
+Review the output — it shows each contact's email, name, conference, the `Fwd:` subject, and a preview of the full body (follow-up note + forwarded original). All rows come from the `contact_status` view.
 
-### Step 3: Send with explicit confirmation
+> If the user explicitly asks to refresh first (e.g. "the DB might be stale"), run `PYTHONUNBUFFERED=1 python crm_check.py` once and then re-run the dry run. Do not do this by default.
+
+### Step 2: Send with explicit confirmation
 
 **CRITICAL**: Only send if the user says exactly **"Please send email"**. "Send", "go ahead", "do it" is NOT sufficient.
 
@@ -117,19 +114,17 @@ Review the output — it shows each contact's email, name, conference, the `Fwd:
 python send_followup.py --send --min-days 5
 ```
 
-### Step 4: Verify delivery
+Each successful send is written to the `emails` table immediately (via `insert_email` in `database/crm_db.py`), so the next follow-up run will automatically skip these contacts (their `COUNT(*) FROM emails > 1`).
 
-After sending, run a CRM check to sync delivery status for the follow-up emails:
+### Step 3: (Optional) Verify delivery later
 
-```bash
-PYTHONUNBUFFERED=1 python crm_check.py
-```
+Delivery, open, click, and bounce status for the new follow-up rows are filled in by the user's regular `crm_check.py` runs. There is no need to run it immediately after sending unless the user specifically asks for an up-to-the-minute report.
 
 ## Important Rules
 
 1. **Never send without explicit permission** — user must say "Please send email"
 2. **Always dry run first** — show preview and get confirmation
-3. **Sync CRM before follow-up** — ensures accurate candidate filtering
+3. **Database is the source of truth** — eligibility is decided by the `contact_status` view + `emails` table, never by querying Postmark. Do not insert a `crm_check.py` step into this workflow unless the user explicitly asks for a fresh sync.
 4. **No double follow-ups** — the script checks email count per contact to skip anyone who already received a follow-up
 5. **Use --min-days in production** — recommended minimum of 3-5 days between initial email and follow-up
 6. **All follow-ups are recorded** — new rows in the `emails` table, automatically tracked by existing CRM views
@@ -138,11 +133,22 @@ PYTHONUNBUFFERED=1 python crm_check.py
 ## Data Flow
 
 ```
-PostgreSQL (contact_status view)
-  → get_followup_candidates() returns eligible contacts + original subject
-  → send_followup.py renders follow-up note + original email body
-  → Combines into Fwd: subject + forwarded message body
-  → Postmark API sends email as a new forward
-  → Result recorded in emails table
-  → crm_check.py syncs delivery status
+PostgreSQL  (single source of truth for eligibility)
+  ├── contact_status view  ── status, sent_at, replied_at, bounced_at, original subject
+  └── emails table         ── COUNT(*) per contact (excludes anyone already followed up)
+        │
+        ▼
+  get_followup_candidates(conn, min_days=N)   ← pure DB query, no Postmark call
+        │
+        ▼
+  send_followup.py renders follow-up note + forwarded original body
+        │
+        ▼
+  Postmark API  ← used ONLY to send the email (not to select recipients)
+        │
+        ▼
+  insert_email() writes the new send back to PostgreSQL.emails
+        │
+        ▼
+  (Out of band)  user's routine crm_check.py later fills in delivered_at / opened_at / replies
 ```

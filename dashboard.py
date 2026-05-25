@@ -18,12 +18,24 @@ from datetime import datetime, timedelta
 # Cloud only populates st.secrets, not the process environment. On local
 # dev, .env handles it and st.secrets is absent — wrapped in try/except
 # so missing secrets.toml doesn't crash local runs.
+_secret_status = "not checked"
 try:
-    for _key in ("DATABASE_URL",):
-        if _key in st.secrets and not os.environ.get(_key):
-            os.environ[_key] = st.secrets[_key]
-except Exception:
-    pass
+    if "DATABASE_URL" in st.secrets:
+        os.environ["DATABASE_URL"] = st.secrets["DATABASE_URL"]
+        _secret_status = "loaded from st.secrets"
+    else:
+        _secret_status = "MISSING from st.secrets"
+except Exception as _exc:
+    _secret_status = f"st.secrets error: {type(_exc).__name__}: {_exc}"
+
+if not os.environ.get("DATABASE_URL"):
+    st.error(
+        "DATABASE_URL is not configured. "
+        f"Secret status: {_secret_status}. "
+        "Open `Manage app → Settings → Secrets` and add:\n\n"
+        '`DATABASE_URL = "postgresql://...neon.tech/crm?sslmode=require"`'
+    )
+    st.stop()
 
 from database.db_config import get_connection
 

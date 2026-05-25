@@ -7,10 +7,66 @@ Used by send_postmark.py, crm_check.py, and other scripts.
 """
 
 import json
+import re
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from .db_config import get_connection
+
+
+# Local-parts that indicate a placeholder/template rather than a real address.
+# Compared by exact equality after lower-casing, so real prefixes like "anom"
+# (which contains "nom") are NOT false-positive matches.
+_PLACEHOLDER_LOCALS: frozenset = frozenset({
+    "firstname", "lastname", "firstname.lastname",
+    "prenom", "nom", "prenom.nom",
+    "yourname", "your.email", "your_email",
+    "name", "email",
+    "noreply", "no-reply",
+    "test", "dummy", "xxx",
+})
+
+# Domains that are obviously test/template placeholders.
+_PLACEHOLDER_DOMAINS: frozenset = frozenset({
+    "example.com", "example.org", "example.net",
+    "test.com", "test.org", "tests.com",
+    "dummy.com", "yourdomain.com", "domain.com",
+})
+
+# Minimal RFC-pragmatic email regex (covers virtually all real academic addrs).
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+
+def is_valid_email(email: str) -> Tuple[bool, str]:
+    """Return (is_valid, reason) for an email address.
+
+    `reason` is an empty string when valid, otherwise a short human-readable
+    explanation for logging/debugging.
+
+    Designed to reject the failure modes we've observed in crawled data:
+      - masked emails from EDAS (contain '*')
+      - compound entries (whitespace, slash, comma, semicolon)
+      - placeholder templates (`firstname.lastname@…`, `prenom.nom@…`)
+      - obvious test/example domains
+      - syntactically malformed addresses
+    """
+    if not email or not isinstance(email, str):
+        return False, "empty or non-string"
+    e = email.strip().lower()
+    if "*" in e:
+        return False, "contains masked characters (*)"
+    if any(c in e for c in (" ", "\t", "/", ",", ";")):
+        return False, "contains whitespace or separator"
+    if e.count("@") != 1:
+        return False, "must contain exactly one @"
+    local, domain = e.split("@")
+    if local in _PLACEHOLDER_LOCALS:
+        return False, f"placeholder local-part: {local}"
+    if domain in _PLACEHOLDER_DOMAINS:
+        return False, f"placeholder domain: {domain}"
+    if not _EMAIL_RE.match(e):
+        return False, "fails basic email regex"
+    return True, ""
 
 
 def _parse_timestamp(ts_str: str) -> Optional[str]:
@@ -34,8 +90,16 @@ def _parse_timestamp(ts_str: str) -> Optional[str]:
 # ── Contact operations ──────────────────────────────────────────────
 
 def upsert_contact(conn, email: str, name: str, conference: str,
-                   source_platform: str = None):
-    """Insert or update a contact."""
+                   source_platform: str = None) -> bool:
+    """Insert or update a contact.
+
+    Returns True if the row was upserted, False if the email failed validation
+    and the row was skipped. A skip is logged so crawler runs surface the cause.
+    """
+    ok, reason = is_valid_email(email)
+    if not ok:
+        print(f"  [SKIP] invalid email '{email}' ({reason})")
+        return False
     cur = conn.cursor()
     if source_platform:
         cur.execute("""
@@ -55,6 +119,7 @@ def upsert_contact(conn, email: str, name: str, conference: str,
                 conference = EXCLUDED.conference
         """, (email, name, conference))
     cur.close()
+    return True
 
 
 # ── Email (send) operations ─────────────────────────────────────────
@@ -268,13 +333,17 @@ def get_all_contacts(conn) -> List[Dict]:
 
 
 def get_contacts_for_sync(conn) -> List[Dict]:
-    """Return contacts that need Postmark sync (not bounced, have a postmark_message_id)."""
+    """Return contacts that need Postmark sync (not bounced, have a postmark_message_id).
+
+    Ordered by email_id for stable, resumable iteration.
+    """
     cur = conn.cursor()
     cur.execute("""
         SELECT email, postmark_message_id, email_id, status
         FROM contact_status
         WHERE postmark_message_id IS NOT NULL
           AND status != 'failed'
+        ORDER BY email_id
     """)
     cols = [desc[0] for desc in cur.description]
     rows = [dict(zip(cols, row)) for row in cur.fetchall()]

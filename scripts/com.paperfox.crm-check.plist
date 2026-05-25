@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.paperfox.crm-check</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/yuhan/email campaign/scripts/run_crm_check.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/yuhan/email campaign</string>
+
+    <!--
+      Run every Monday at 09:00 local time.
+      launchd Weekday: 0/7 = Sunday, 1 = Monday, ..., 6 = Saturday.
+      If the Mac is asleep at 09:00, launchd will run the job once on wake.
+    -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/yuhan/email campaign/logs/launchd.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/yuhan/email campaign/logs/launchd.stderr.log</string>
+</dict>
+</plist>
