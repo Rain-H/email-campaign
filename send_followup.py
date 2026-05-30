@@ -34,24 +34,15 @@ def load_followup_body(path="followup-1.md"):
         return f.read().strip()
 
 
-def load_original_template(path="email-template-v2.md"):
-    """Load the original email template and extract subject + body."""
-    with open(path, "r") as f:
-        text = f.read().strip()
-    lines = text.split("\n")
-    subject = ""
-    body_start = 0
-    for i, line in enumerate(lines):
-        if line.lower().startswith("subject:"):
-            subject = line.split(":", 1)[1].strip()
-            body_start = i + 1
-            break
-    body = "\n".join(lines[body_start:]).strip()
-    return subject, body
-
-
 def build_forwarded_body(followup_text, original_subject, original_body, sender):
-    """Build the full email with forwarded original below the new note."""
+    """Build the full email with forwarded original below the new note.
+
+    `original_body` MUST be the exact body that was originally delivered
+    (read from emails.body_text in the DB). Re-rendering the template at
+    follow-up time is not safe — templates, [Platform] defaults, conference
+    naming, etc. all drift over time, so the forwarded content would no
+    longer match what the recipient actually received.
+    """
     plain = (
         f"{followup_text}\n\n"
         f"---------- Forwarded message ----------\n"
@@ -63,12 +54,20 @@ def build_forwarded_body(followup_text, original_subject, original_body, sender)
 
 
 def send_forward(recipient, subject, plain_body, html_body, dry_run=True):
-    """Send a follow-up as a forward (new email, no threading headers)."""
+    """Send a follow-up as a forward (new email, no threading headers).
+
+    Carries the full rendered plain_body / html_body in the result so
+    save_to_db() can store them on the new emails row — preserving the same
+    "the DB is the source of truth for what was sent" invariant that
+    send_postmark.py now follows.
+    """
     result = {
         "email": recipient["email"],
         "conference": recipient["conference"],
         "chair_name": recipient["chair_name"],
         "subject": subject,
+        "plain_body": plain_body,
+        "html_body": html_body,
     }
 
     if dry_run:
@@ -76,7 +75,11 @@ def send_forward(recipient, subject, plain_body, html_body, dry_run=True):
         return result
 
     try:
-        resp = requests.post(
+        # Bypass HTTP(S)_PROXY env vars (same fix as send_postmark.py): Postmark
+        # is publicly reachable and routing through a local proxy is never wanted.
+        _session = requests.Session()
+        _session.trust_env = False
+        resp = _session.post(
             POSTMARK_API_URL,
             headers={
                 "Accept": "application/json",
@@ -124,6 +127,8 @@ def save_to_db(results):
         email_id = insert_email(
             conn, r["email"], r.get("postmark_message_id", ""),
             r.get("subject", ""), r.get("sent_at", ""),
+            body_text=r.get("plain_body"),
+            body_html=r.get("html_body"),
         )
         if email_id:
             added += 1
@@ -142,8 +147,6 @@ def main():
                         help="Only follow up contacts whose first email was sent N+ days ago (0 = no minimum)")
     parser.add_argument("--template", default="followup-1.md",
                         help="Path to follow-up body template file")
-    parser.add_argument("--original-template", default="email-template-v2.md",
-                        help="Path to original email template (for forwarded content)")
     parser.add_argument("--test", action="store_true",
                         help="Use test database (crm_test) instead of production")
     args = parser.parse_args()
@@ -157,7 +160,6 @@ def main():
         sys.exit(1)
 
     body_template = load_followup_body(args.template)
-    orig_subject_template, orig_body_template = load_original_template(args.original_template)
 
     from database.db_config import get_connection
     from database.crm_db import get_followup_candidates
@@ -172,6 +174,20 @@ def main():
     print(f"Found {len(candidates)} unreplied contact(s) eligible for follow-up")
     if args.min_days > 0:
         print(f"  (filtered to first email sent {args.min_days}+ days ago)")
+
+    # Skip contacts whose original body was never stored / cannot be backfilled
+    # (typically: sent > 45 days ago, before Postmark's retention window).
+    # Forwarding them would require re-rendering the template, which is exactly
+    # the drift problem we're fixing — so skipping is the safe choice.
+    missing = [c for c in candidates if not c.get("body_text")]
+    candidates = [c for c in candidates if c.get("body_text")]
+    if missing:
+        print(f"  SKIPPED {len(missing)} candidate(s) with no stored body "
+              f"(run backfill_email_bodies.py to recover, or accept the loss):")
+        for c in missing[:10]:
+            print(f"    - {c['email']:35s}  {c['conference']:25s}  sent {c['sent_at']}")
+        if len(missing) > 10:
+            print(f"    ... and {len(missing)-10} more")
 
     if args.limit > 0:
         candidates = candidates[:args.limit]
@@ -197,8 +213,12 @@ def main():
         original_subject = r["subject"]
         fwd_subject = f"Fwd: {original_subject}"
 
+        # follow-up note: still rendered from template (small, simple, only
+        # needs first_name + conference, no platform).
         followup_text = render(body_template, r["conference"], r["first_name"])
-        original_body = render(orig_body_template, r["conference"], r["first_name"])
+
+        # original body: read from DB — exact bytes that were delivered.
+        original_body = r["body_text"]
 
         plain_body = build_forwarded_body(
             followup_text, original_subject, original_body, SENDER_EMAIL

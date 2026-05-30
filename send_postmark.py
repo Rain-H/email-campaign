@@ -257,12 +257,20 @@ def _get_already_sent_emails() -> set:
 # ---------- sending ----------
 
 def send_email(recipient, subject, plain_body, html_body, dry_run=True):
-    """Send a single email via Postmark. Returns result dict."""
+    """Send a single email via Postmark. Returns result dict.
+
+    The rendered plain_body / html_body / platform are carried into the result
+    so that save_to_db() can persist them on the emails row. This lets future
+    follow-ups forward the exact content that was actually delivered.
+    """
     result = {
         "email": recipient["chair_email"],
         "conference": recipient["conference_short_name"],
         "chair_name": recipient["chair_name"],
+        "platform": recipient.get("platform"),
         "subject": subject,
+        "plain_body": plain_body,
+        "html_body": html_body,
     }
 
     if dry_run:
@@ -425,6 +433,8 @@ def save_to_db(results):
         email_id = insert_email(
             conn, r["email"], r.get("postmark_message_id", ""),
             r.get("subject", ""), r.get("sent_at", ""),
+            body_text=r.get("plain_body"),
+            body_html=r.get("html_body"),
         )
         if email_id:
             added += 1

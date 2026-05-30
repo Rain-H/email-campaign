@@ -125,16 +125,25 @@ def upsert_contact(conn, email: str, name: str, conference: str,
 # ── Email (send) operations ─────────────────────────────────────────
 
 def insert_email(conn, contact_email: str, postmark_message_id: str,
-                 subject: str, sent_at: str) -> Optional[int]:
-    """Record a sent email. Returns the email row id."""
+                 subject: str, sent_at: str,
+                 body_text: Optional[str] = None,
+                 body_html: Optional[str] = None) -> Optional[int]:
+    """Record a sent email. Stores body_text/body_html so follow-ups can later
+    forward the exact content that was actually delivered, instead of
+    re-rendering the template (which drifts when templates change or when
+    render() gains new parameters).
+
+    Returns the email row id.
+    """
     cur = conn.cursor()
     ts = _parse_timestamp(sent_at) or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     cur.execute("""
-        INSERT INTO emails (contact_email, postmark_message_id, subject, sent_at)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO emails (contact_email, postmark_message_id, subject, sent_at,
+                            body_text, body_html)
+        VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (postmark_message_id) DO NOTHING
         RETURNING id
-    """, (contact_email, postmark_message_id, subject, ts))
+    """, (contact_email, postmark_message_id, subject, ts, body_text, body_html))
     row = cur.fetchone()
     cur.close()
     return row[0] if row else None
@@ -396,6 +405,17 @@ def get_followup_candidates(conn, min_days: int = 0) -> List[Dict]:
     (i.e. no follow-up already sent).
     Optional min_days filters to contacts whose first email was sent at least
     N days ago.
+
+    Each row carries body_text / body_html from the original send so the
+    caller can forward the exact content that was delivered, rather than
+    re-rendering the template at follow-up time.
+
+    Implementation note: the body is fetched in a second batched query rather
+    than joined into the main query. Joining emails back onto contact_status
+    triggers a bad query plan (the view already does LATERAL ORDER BY LIMIT 1
+    over emails; re-joining the same table causes the planner to materialise
+    the LATERAL subquery repeatedly and the query slows from ~5s to ~120s).
+    Two indexed queries are dramatically faster than one badly-planned join.
     """
     cur = conn.cursor()
     day_filter = ""
@@ -406,7 +426,8 @@ def get_followup_candidates(conn, min_days: int = 0) -> List[Dict]:
     cur.execute(f"""
         SELECT cs.email, cs.chair_name, cs.conference,
                cs.sent_at, cs.status,
-               cs.postmark_message_id, cs.subject
+               cs.postmark_message_id, cs.subject,
+               cs.email_id
         FROM contact_status cs
         WHERE cs.status IN ('no_reply', 'opened_no_reply', 'clicked_no_reply')
           AND cs.bounced_at IS NULL
@@ -417,6 +438,23 @@ def get_followup_candidates(conn, min_days: int = 0) -> List[Dict]:
     """, params)
     cols = [desc[0] for desc in cur.description]
     rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    # Batched body fetch — single roundtrip, indexed by primary key.
+    email_ids = [r["email_id"] for r in rows if r.get("email_id") is not None]
+    if email_ids:
+        cur.execute(
+            "SELECT id, body_text, body_html FROM emails WHERE id = ANY(%s)",
+            (email_ids,),
+        )
+        body_map = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+        for r in rows:
+            text, html = body_map.get(r["email_id"], (None, None))
+            r["body_text"] = text
+            r["body_html"] = html
+    else:
+        for r in rows:
+            r["body_text"] = None
+            r["body_html"] = None
     cur.close()
     return rows
 
