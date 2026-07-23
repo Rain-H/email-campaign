@@ -47,3 +47,7 @@ replied_from_firstsend_*.csv
 contacts_*_unsent_*.csv
 unsent_chairs.csv
 replies_review.txt
+
+# Test fixture for send_postmark.py --test / send_followup.py --test
+# (README documents this as "local, not in git" — actually enforce that).
+test_data.csv

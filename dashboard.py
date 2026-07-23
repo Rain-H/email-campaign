@@ -68,7 +68,11 @@ def get_weekly_data(num_weeks: int = 12):
     cur = conn.cursor()
     
     weeks = []
-    now = datetime.now()
+    # UTC, not local time: sent_at/replied_at are stored as naive-UTC
+    # timestamps (see database/crm_db.py's _parse_timestamp), so computing
+    # "current week" from local time here would misbucket emails sent near a
+    # week boundary whenever the local timezone isn't UTC.
+    now = datetime.utcnow()
     current_year, current_week, _ = now.isocalendar()
     
     for i in range(num_weeks):

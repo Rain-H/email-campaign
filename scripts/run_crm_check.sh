@@ -2,11 +2,12 @@
 # Wrapper for scheduled crm_check.py runs via launchd.
 #
 # Responsibilities:
-#   1. Detect whether the LAN proxy is currently reachable; only export
-#      proxy env vars when it is, so the job still works off-network.
-#   2. cd into the project so crm_check.py finds .env via load_dotenv().
-#   3. Append all output (stdout + stderr) to logs/crm_check.log with a
+#   1. cd into the project so crm_check.py finds .env via load_dotenv().
+#   2. Append all output (stdout + stderr) to logs/crm_check.log with a
 #      timestamped run banner so weekly runs are easy to scan.
+#   3. Always run direct (no LAN proxy) — proxy probing was removed since
+#      it added a flaky dependency for no benefit once we confirmed direct
+#      connectivity works from this machine.
 
 set -uo pipefail
 
@@ -14,10 +15,6 @@ PROJECT_DIR="/Users/yuhan/email campaign"
 PYTHON_BIN="/Users/yuhan/opt/anaconda3/bin/python"
 LOG_DIR="$PROJECT_DIR/logs"
 LOG_FILE="$LOG_DIR/crm_check.log"
-
-PROXY_HOST="192.168.11.123"
-PROXY_PORT="16780"
-PROXY_PROBE_TIMEOUT="2"
 
 mkdir -p "$LOG_DIR"
 
@@ -31,15 +28,9 @@ log() {
     log "scheduled crm_check.py run starting"
 } >>"$LOG_FILE"
 
-if /usr/bin/nc -z -w "$PROXY_PROBE_TIMEOUT" "$PROXY_HOST" "$PROXY_PORT" >/dev/null 2>&1; then
-    export http_proxy="http://${PROXY_HOST}:${PROXY_PORT}"
-    export https_proxy="http://${PROXY_HOST}:${PROXY_PORT}"
-    export all_proxy="socks5://${PROXY_HOST}:${PROXY_PORT}"
-    log "proxy reachable at ${PROXY_HOST}:${PROXY_PORT} — using proxy"
-else
-    unset http_proxy https_proxy all_proxy 2>/dev/null || true
-    log "proxy not reachable — falling back to direct connection"
-fi
+# Proxy disabled — always use direct connection.
+unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY 2>/dev/null || true
+log "proxy disabled — using direct connection"
 
 cd "$PROJECT_DIR" || {
     log "FATAL: cannot cd to $PROJECT_DIR"

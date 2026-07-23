@@ -256,27 +256,17 @@ def _get_already_sent_emails() -> set:
 
 # ---------- sending ----------
 
-def send_email(recipient, subject, plain_body, html_body, dry_run=True):
-    """Send a single email via Postmark. Returns result dict.
+def postmark_send(payload: dict, dry_run: bool = True) -> dict:
+    """Low-level Postmark send. Returns a dict with status/postmark_message_id/error info.
 
-    The rendered plain_body / html_body / platform are carried into the result
-    so that save_to_db() can persist them on the emails row. This lets future
-    follow-ups forward the exact content that was actually delivered.
+    Shared by send_postmark.py's send_email() and send_followup.py's send_forward()
+    so the proxy-bypass, timeout, and response-parsing logic exists in exactly one
+    place instead of being copy-pasted across both scripts.
     """
-    result = {
-        "email": recipient["chair_email"],
-        "conference": recipient["conference_short_name"],
-        "chair_name": recipient["chair_name"],
-        "platform": recipient.get("platform"),
-        "subject": subject,
-        "plain_body": plain_body,
-        "html_body": html_body,
-    }
-
     if dry_run:
-        result["status"] = "dry_run"
-        return result
+        return {"status": "dry_run", "sent_at": datetime.now(timezone.utc).isoformat()}
 
+    result = {}
     try:
         # Use a Session with trust_env=False to bypass any proxy env vars that
         # may be set by .env (e.g. HTTP_PROXY=http://127.0.0.1:7892). Postmark
@@ -290,16 +280,7 @@ def send_email(recipient, subject, plain_body, html_body, dry_run=True):
                 "Content-Type": "application/json",
                 "X-Postmark-Server-Token": POSTMARK_SERVER_TOKEN,
             },
-            json={
-                "From": SENDER_EMAIL,
-                "To": recipient["chair_email"],
-                "Subject": subject,
-                "HtmlBody": html_body,
-                "TextBody": plain_body,
-                "MessageStream": "outbound",
-                "TrackOpens": True,
-                "TrackLinks": "HtmlOnly",
-            },
+            json=payload,
             timeout=30,
         )
         data = resp.json()
@@ -315,6 +296,37 @@ def send_email(recipient, subject, plain_body, html_body, dry_run=True):
         result["error_message"] = str(e)
 
     result["sent_at"] = datetime.now(timezone.utc).isoformat()
+    return result
+
+
+def send_email(recipient, subject, plain_body, html_body, dry_run=True):
+    """Send a single email via Postmark. Returns result dict.
+
+    The rendered plain_body / html_body / platform are carried into the result
+    so that save_email_result_to_db() can persist them on the emails row. This
+    lets future follow-ups forward the exact content that was actually delivered.
+    """
+    result = {
+        "email": recipient["chair_email"],
+        "conference": recipient["conference_short_name"],
+        "chair_name": recipient["chair_name"],
+        "platform": recipient.get("platform"),
+        "subject": subject,
+        "plain_body": plain_body,
+        "html_body": html_body,
+    }
+
+    send_result = postmark_send({
+        "From": SENDER_EMAIL,
+        "To": recipient["chair_email"],
+        "Subject": subject,
+        "HtmlBody": html_body,
+        "TextBody": plain_body,
+        "MessageStream": "outbound",
+        "TrackOpens": True,
+        "TrackLinks": "HtmlOnly",
+    }, dry_run=dry_run)
+    result.update(send_result)
     return result
 
 
@@ -372,34 +384,57 @@ def main():
     print(f"Recipients: {len(recipients)}")
     print()
 
+    # Open the DB connection *before* the send loop (when actually sending) so
+    # each successful send can be persisted immediately. Previously all results
+    # were only written to the DB once, after the entire loop finished — if the
+    # process died mid-run (network drop, Ctrl-C, an unhandled exception), every
+    # email Postmark had already delivered up to that point would be invisible
+    # to `_get_already_sent_emails()` on the next run, causing a re-send to the
+    # same chairs. Persisting per-email closes that gap.
+    db_conn = None
+    if not dry_run:
+        from database.db_config import get_connection
+        db_conn = get_connection()
+
     results = []
-    for i, r in enumerate(recipients):
-        platform = r.get("platform", "EasyChair")
-        subject = render(subject_template, r["conference_short_name"], r["first_name"], platform)
-        plain_body = render(body_template, r["conference_short_name"], r["first_name"], platform)
-        html_body = plain_to_html(plain_body)
+    added = 0
+    try:
+        for i, r in enumerate(recipients):
+            platform = r.get("platform", "EasyChair")
+            subject = render(subject_template, r["conference_short_name"], r["first_name"], platform)
+            plain_body = render(body_template, r["conference_short_name"], r["first_name"], platform)
+            html_body = plain_to_html(plain_body)
 
-        # Show preview for first 3
-        if i < 3 or dry_run:
-            print(f"--- Email {i+1} ---")
-            print(f"  To:      {r['chair_email']}")
-            print(f"  Name:    {r['chair_name']}")
-            print(f"  Subject: {subject}")
-            if i < 2:  # Full preview for first 2
-                print(f"  Body:\n{plain_body}")
-            print()
+            # Show preview for first 3
+            if i < 3 or dry_run:
+                print(f"--- Email {i+1} ---")
+                print(f"  To:      {r['chair_email']}")
+                print(f"  Name:    {r['chair_name']}")
+                print(f"  Subject: {subject}")
+                if i < 2:  # Full preview for first 2
+                    print(f"  Body:\n{plain_body}")
+                print()
 
-        result = send_email(r, subject, plain_body, html_body, dry_run=dry_run)
-        results.append(result)
+            result = send_email(r, subject, plain_body, html_body, dry_run=dry_run)
+            results.append(result)
 
-        if not dry_run:
-            status = result.get("status", "?")
-            extra = ""
-            if status == "error":
-                extra = f"  ERR_CODE={result.get('error_code')!r}  ERR_MSG={result.get('error_message','')[:200]!r}"
-            print(f"  [{i+1}/{len(recipients)}] {r['chair_email']:40s} {status}{extra}", flush=True)
-            if i < len(recipients) - 1:
-                time.sleep(0.5)
+            if not dry_run:
+                status = result.get("status", "?")
+                extra = ""
+                if status == "error":
+                    extra = f"  ERR_CODE={result.get('error_code')!r}  ERR_MSG={result.get('error_message','')[:200]!r}"
+                print(f"  [{i+1}/{len(recipients)}] {r['chair_email']:40s} {status}{extra}", flush=True)
+
+                # Persist immediately — see comment above on why this can't wait
+                # until the end of the loop.
+                if save_email_result_to_db(db_conn, result):
+                    added += 1
+
+                if i < len(recipients) - 1:
+                    time.sleep(0.5)
+    finally:
+        if db_conn is not None:
+            db_conn.close()
 
     # Summary
     sent = sum(1 for r in results if r["status"] == "sent")
@@ -412,35 +447,31 @@ def main():
         print("Run with --send to actually send")
     else:
         print(f"DONE: {sent} sent, {errors} errors")
-
-    # Write results to database
-    if not dry_run:
-        save_to_db(results)
+        print(f"Database updated: {added} email(s) recorded")
 
 
-def save_to_db(results):
-    """Write send results directly into PostgreSQL database."""
+def save_email_result_to_db(conn, result) -> bool:
+    """Persist one sent-email result immediately (upsert contact + insert email + commit).
+
+    Returns True if a new email row was recorded. Called right after each
+    send_email() so a mid-run crash never leaves a Postmark-delivered email
+    un-recorded in the DB (which would otherwise make it look "unsent" and
+    cause a duplicate send on the next run).
+    """
     from database.crm_db import upsert_contact, insert_email
-    from database.db_config import get_connection
 
-    conn = get_connection()
-    added = 0
-    for r in results:
-        if r["status"] != "sent":
-            continue
-        upsert_contact(conn, r["email"], r.get("chair_name", ""), r.get("conference", ""),
-                       source_platform=r.get("platform"))
-        email_id = insert_email(
-            conn, r["email"], r.get("postmark_message_id", ""),
-            r.get("subject", ""), r.get("sent_at", ""),
-            body_text=r.get("plain_body"),
-            body_html=r.get("html_body"),
-        )
-        if email_id:
-            added += 1
+    if result.get("status") != "sent":
+        return False
+    upsert_contact(conn, result["email"], result.get("chair_name", ""), result.get("conference", ""),
+                   source_platform=result.get("platform"))
+    email_id = insert_email(
+        conn, result["email"], result.get("postmark_message_id", ""),
+        result.get("subject", ""), result.get("sent_at", ""),
+        body_text=result.get("plain_body"),
+        body_html=result.get("html_body"),
+    )
     conn.commit()
-    conn.close()
-    print(f"Database updated: {added} email(s) recorded")
+    return bool(email_id)
 
 
 if __name__ == "__main__":

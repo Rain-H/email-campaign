@@ -2,30 +2,47 @@
 """
 统计还没发过第一封 cold email 的 chair 数量。
 
-候选池 = 三个 crawl 输出 CSV 合并去重 (按 email):
-  - crawled_easychair_2026-05-14.csv          (EasyChair 完整 crawl)
-  - crawled_easychair_2026-05-14_sendable.csv (EasyChair 筛掉不可发的子集)
-  - contacts_edas_unsent_2026-05-19.csv       (EDAS unsent)
+候选池 = 所有匹配的 crawl 输出 CSV 合并去重 (按 email)。默认按文件名 glob
+自动发现，而不是硬编码具体日期的文件名——硬编码过一次就必然会在下次重新
+crawl 之后过期（不会被自动捡起新文件），需要人工记得去改这份列表。
+也可以用 --files 显式传入文件名列表覆盖自动发现。
 
 "已发过" = email 在 Neon 生产库 contacts 表里有记录 (等价于 emails 表 >=1 行)
 """
+import argparse
 import csv
+import glob
 import sys
 from collections import defaultdict
 from database.db_config import get_connection
 
 
-CANDIDATE_FILES = [
-    "crawled_easychair_2026-05-14.csv",
-    "crawled_easychair_2026-05-14_sendable.csv",
-    "contacts_edas_unsent_2026-05-19.csv",
+# Glob patterns covering both crawlers' output naming conventions.
+CANDIDATE_GLOBS = [
+    "crawled_easychair_*.csv",
+    "crawled_edas_*.csv",
+    "contacts_edas*.csv",
 ]
 
 
-def load_candidates():
+def discover_candidate_files():
+    """Auto-discover candidate CSVs by glob so newly-crawled files are picked
+    up automatically instead of requiring a hardcoded, date-specific list
+    that goes stale the moment a new crawl runs."""
+    found = []
+    seen = set()
+    for pattern in CANDIDATE_GLOBS:
+        for fname in sorted(glob.glob(pattern)):
+            if fname not in seen:
+                seen.add(fname)
+                found.append(fname)
+    return found
+
+
+def load_candidates(files):
     """返回 {email_lower: {"name": ..., "conference": ..., "sources": set()}}"""
     pool = {}
-    for fname in CANDIDATE_FILES:
+    for fname in files:
         try:
             with open(fname, newline="", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
@@ -56,8 +73,15 @@ def load_sent_emails():
 
 
 def main():
-    print("Loading candidate pool from CSVs ...")
-    candidates = load_candidates()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--files", nargs="+", default=None,
+                        help="Explicit list of candidate CSV files "
+                             "(default: auto-discover via glob patterns)")
+    args = parser.parse_args()
+
+    files = args.files if args.files else discover_candidate_files()
+    print(f"Loading candidate pool from {len(files)} CSV file(s): {files}")
+    candidates = load_candidates(files)
     print(f"  Unique candidate emails (after dedupe): {len(candidates)}")
 
     by_source = defaultdict(int)

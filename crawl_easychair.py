@@ -482,19 +482,14 @@ Page text:
 
 
 def get_openai_client():
-    """Initialize OpenAI client for web search, using local HTTP proxy if set."""
+    """Initialize OpenAI client for web search (direct connection; proxy disabled)."""
     key = os.getenv("OPENAI_API_KEY")
     if not key:
         raise RuntimeError("OPENAI_API_KEY not set in .env")
     if _OpenAI is None:
         raise RuntimeError("openai package missing. pip install openai>=1.66.0")
     base_url = os.getenv("OPENAI_BASE_PATH", "https://api.openai.com/v1")
-    proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
     kwargs = dict(api_key=key, base_url=base_url, timeout=60.0, max_retries=1)
-    if proxy:
-        import httpx
-        kwargs["http_client"] = httpx.Client(proxy=proxy)
-        print(f"OpenAI client using proxy: {proxy}")
     return _OpenAI(**kwargs)
 
 
@@ -910,6 +905,7 @@ def main():
     for idx, conf_short in enumerate(short_names, start=1):
         print(f"[{idx}/{len(short_names)}] crawling {conf_short}")
         rows = []
+        fatal = False
         try:
             signal.alarm(PER_CONFERENCE_TIMEOUT)
             rows = crawl_one_conference(client, openai_client, conf_short)
@@ -918,6 +914,16 @@ def main():
             rows = to_output_rows(conf_short, "", "", [])
         except Exception as e:
             print(f"    ! Unexpected error on {conf_short}: {e}")
+            # is_connection_error() flags FATAL connectivity failures (proxy
+            # down, OpenAI unreachable) as opposed to per-site failures. Those
+            # propagate up as RuntimeError from openai_web_search_*(). Previously
+            # this branch treated them the same as any other per-conference
+            # error and kept looping — burning through every remaining
+            # conference retrying (and failing) the same broken connection
+            # instead of stopping, unlike crawl_edas.py's equivalent handling.
+            if is_connection_error(e):
+                print("    ! Fatal connection error — stopping crawl immediately")
+                fatal = True
             rows = to_output_rows(conf_short, "", "", [])
         finally:
             signal.alarm(0)
@@ -925,6 +931,8 @@ def main():
         save_json(args.output, all_rows)
         save_csv(args.csv_output, all_rows)
         print(f"    saved progress: {len(all_rows)} rows")
+        if fatal:
+            break
 
     print(f"Done. JSON: {args.output} | CSV: {args.csv_output}")
 

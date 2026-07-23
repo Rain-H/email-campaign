@@ -380,21 +380,53 @@ def decode_mime_header(header: str) -> str:
     return "".join(result)
 
 
+def _html_to_text(html: str) -> str:
+    """Very small HTML->text fallback for replies with no text/plain part."""
+    try:
+        from bs4 import BeautifulSoup
+        return BeautifulSoup(html, "html.parser").get_text("\n", strip=True)
+    except Exception:
+        # bs4 not available or parse failure: crude tag strip so we at least
+        # get *something* instead of leaving full_content empty.
+        return re.sub(r"<[^>]+>", " ", html)
+
+
 def get_email_body(msg) -> str:
-    body = ""
+    """Extract reply body text, preferring text/plain but falling back to
+    text/html (converted to plain text) when no plain-text part exists.
+
+    Without the HTML fallback, HTML-only replies come back as an empty
+    string; downstream, get_unclassified_replies() filters out empty
+    full_content, so those replies would never reach AI classification and
+    would sit permanently as the default is_interested=False — silently
+    losing genuinely interested replies that happened to be sent in HTML.
+    """
+    plain_body = ""
+    html_body = ""
     if msg.is_multipart():
         for part in msg.walk():
-            if part.get_content_type() == "text/plain":
+            ctype = part.get_content_type()
+            if ctype == "text/plain" and not plain_body:
                 try:
-                    body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
-                    break
+                    plain_body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                except Exception:
+                    pass
+            elif ctype == "text/html" and not html_body:
+                try:
+                    html_body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
                 except Exception:
                     pass
     else:
         try:
-            body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
+            payload = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
         except Exception:
-            pass
+            payload = ""
+        if msg.get_content_type() == "text/html":
+            html_body = payload
+        else:
+            plain_body = payload
+
+    body = plain_body.strip() or (_html_to_text(html_body).strip() if html_body else "")
     return body[:1000]
 
 
@@ -414,8 +446,27 @@ def parse_email_date(date_str: str) -> Optional[datetime]:
         return None
 
 
+_SUBJECT_PREFIX_RE = re.compile(r"^\s*(?:(?:re|fwd?|aw|sv|antw)\s*:\s*|\[ext\]\s*)+", re.IGNORECASE)
+
+
+def _normalize_subject(subject: str) -> str:
+    """Strip leading Re:/Fwd:/Aw:/[EXT] chains so subjects can be compared
+    regardless of how many reply/forward prefixes a mail client stacked on."""
+    return _SUBJECT_PREFIX_RE.sub("", subject or "").strip().lower()
+
+
 def is_reply_to_campaign(msg, contact: Dict) -> bool:
-    """Check if an email is a genuine reply to a campaign message."""
+    """Check if an email is a genuine reply to a campaign message.
+
+    Two independent signals, either is sufficient:
+      1. Threading headers (In-Reply-To / References) contain our Postmark
+         Message-ID — the strongest signal, present whenever the recipient's
+         mail client replied normally.
+      2. Subject matches the original campaign subject once Re:/Fwd:/Aw:/
+         [EXT] prefixes are stripped from both sides — looser than an exact
+         "Re: <subject>" match so it still works after multiple hops
+         (e.g. "Fwd: Re: [EXT] Re: Quick question...").
+    """
     msg_id = contact.get("postmark_message_id", "")
 
     if msg_id:
@@ -426,10 +477,8 @@ def is_reply_to_campaign(msg, contact: Dict) -> bool:
 
     subject = decode_mime_header(msg.get("Subject", ""))
     campaign_subject = contact.get("subject", "")
-    if campaign_subject:
-        expected_reply_subject = f"Re: {campaign_subject}"
-        if subject.strip().lower() == expected_reply_subject.lower():
-            return True
+    if campaign_subject and _normalize_subject(subject) == _normalize_subject(campaign_subject):
+        return True
 
     return False
 
@@ -447,9 +496,17 @@ def is_auto_reply(subject: str) -> bool:
 
 def check_replies(conn, since_days: int = 30) -> int:
     """Check IMAP inbox for replies using FROM-based search.
-    
-    Searches for emails from contacts in the database, which is more reliable
-    than subject-based matching (handles Re:, Fwd:, [EXT] prefixes, etc.)
+
+    Searches for emails from contacts in the database (FROM + SINCE), then
+    disambiguates among matches using is_reply_to_campaign() (threading
+    headers, falling back to a loosened subject match). FROM-based search
+    alone is used as the *candidate* filter because subject-based search is
+    unreliable across Re:/Fwd:/[EXT] prefix variations, but without the
+    is_reply_to_campaign() check, ANY email from that address after the send
+    date — even one unrelated to this campaign — would get recorded as a
+    "reply", silently blocking future follow-ups and skewing reply-rate
+    stats. When a contact has multiple matching messages, a verified one is
+    always preferred over an unverified one.
     """
     from database.crm_db import get_unreplied_contacts, insert_reply
 
@@ -494,6 +551,10 @@ def check_replies(conn, since_days: int = 30) -> int:
                 if not email_ids:
                     continue
 
+                # Collect all plausible candidates first instead of acting on
+                # the first FROM/SINCE match — that match could easily be an
+                # unrelated email from this address. We pick the best one below.
+                candidates = []
                 for eid in email_ids:
                     st, msg_data = mail.fetch(eid, "(RFC822)")
                     if st != "OK":
@@ -525,14 +586,34 @@ def check_replies(conn, since_days: int = 30) -> int:
                         except Exception:
                             pass
 
-                    date_str = msg.get("Date", "")
-                    body = get_email_body(msg)
+                    candidates.append({
+                        "from_email": from_email,
+                        "subject": subject,
+                        "date_str": msg.get("Date", ""),
+                        "body": get_email_body(msg),
+                        "verified": is_reply_to_campaign(msg, contact),
+                    })
 
-                    reply_id = insert_reply(conn, contact["email_id"], date_str, body, False)
-                    if reply_id:
-                        found += 1
-                        print(f"    Reply from {from_email} (subject: {subject[:50]})")
-                    break
+                if not candidates:
+                    continue
+
+                # Prefer a verified match (threading headers or normalized
+                # subject match) over an unverified one; among ties, keep IMAP
+                # search order (oldest first).
+                chosen = next((c for c in candidates if c["verified"]), candidates[0])
+                if not chosen["verified"] and len(candidates) > 0:
+                    print(f"    ! No campaign-thread match for {contact_email}; "
+                          f"using earliest FROM-matched email as best guess "
+                          f"(subject: {chosen['subject'][:50]!r})")
+
+                reply_id = insert_reply(
+                    conn, contact["email_id"], chosen["date_str"], chosen["body"], False
+                )
+                if reply_id:
+                    found += 1
+                    verified_tag = "" if chosen["verified"] else " [unverified]"
+                    print(f"    Reply from {chosen['from_email']} "
+                          f"(subject: {chosen['subject'][:50]}){verified_tag}")
 
             except Exception as e:
                 pass

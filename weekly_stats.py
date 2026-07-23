@@ -20,7 +20,17 @@ from database.db_config import get_connection
 
 
 def get_week_range(year: int, week: int) -> Tuple[datetime, datetime]:
-    """Get start (Monday) and end (Sunday) of ISO week."""
+    """Get start (Monday) and end (Sunday) of ISO week, as naive UTC datetimes.
+
+    `sent_at` / `replied_at` are stored as naive-but-UTC timestamps (see
+    database/crm_db.py's _parse_timestamp / send_postmark.py's
+    datetime.now(timezone.utc)). Returning naive-local boundaries here and
+    comparing them directly against those columns silently shifted emails
+    sent near a week boundary into the wrong week whenever the local
+    timezone wasn't UTC (e.g. a Sunday-night US-time send is already Monday
+    in UTC). Callers must not attach tzinfo — the DB columns are naive — so
+    we keep these naive too, just anchored to UTC instead of local time.
+    """
     jan4 = datetime(year, 1, 4)
     start_of_week1 = jan4 - timedelta(days=jan4.weekday())
     week_start = start_of_week1 + timedelta(weeks=week - 1)
@@ -29,8 +39,9 @@ def get_week_range(year: int, week: int) -> Tuple[datetime, datetime]:
 
 
 def get_current_week() -> Tuple[int, int]:
-    """Get current ISO year and week number."""
-    now = datetime.now()
+    """Get current ISO year and week number, based on UTC (not local time) —
+    consistent with get_week_range()'s UTC-anchored boundaries."""
+    now = datetime.utcnow()
     return now.isocalendar()[:2]
 
 
@@ -117,13 +128,19 @@ def get_total_stats(conn) -> Dict:
     cur.execute("SELECT COUNT(*) FROM conversations")
     total_conversations = cur.fetchone()[0]
     
-    # Contacts with multiple back-and-forth
+    # Contacts with multiple back-and-forth (>= 4 messages in the thread).
+    # Wrapped in an outer COUNT(*) so the result is an explicit scalar rather
+    # than relying on cur.rowcount, which happened to equal the right number
+    # here (one row per qualifying group) but would silently break if this
+    # query were ever "simplified" to a plain fetchone()[0].
     cur.execute("""
-        SELECT COUNT(DISTINCT contact_email) FROM conversations
-        GROUP BY contact_email
-        HAVING COUNT(*) >= 4
+        SELECT COUNT(*) FROM (
+            SELECT contact_email FROM conversations
+            GROUP BY contact_email
+            HAVING COUNT(*) >= 4
+        ) AS engaged
     """)
-    engaged_contacts = cur.rowcount
+    engaged_contacts = cur.fetchone()[0]
     
     cur.close()
     

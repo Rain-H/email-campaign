@@ -10,16 +10,15 @@ import argparse
 import os
 import sys
 import time
-from datetime import datetime, timezone
 
-import requests
 from dotenv import load_dotenv
 
 from send_postmark import (
     render,
     plain_to_html,
     extract_greeting_name,
-    POSTMARK_API_URL,
+    postmark_send,
+    save_email_result_to_db,
 )
 
 load_dotenv()
@@ -57,9 +56,11 @@ def send_forward(recipient, subject, plain_body, html_body, dry_run=True):
     """Send a follow-up as a forward (new email, no threading headers).
 
     Carries the full rendered plain_body / html_body in the result so
-    save_to_db() can store them on the new emails row — preserving the same
-    "the DB is the source of truth for what was sent" invariant that
-    send_postmark.py now follows.
+    save_email_result_to_db() can store them on the new emails row — preserving
+    the same "the DB is the source of truth for what was sent" invariant that
+    send_postmark.py follows. Delegates the actual Postmark POST to
+    postmark_send() (shared with send_postmark.py) instead of duplicating the
+    proxy-bypass / response-parsing logic here.
     """
     result = {
         "email": recipient["email"],
@@ -69,72 +70,18 @@ def send_forward(recipient, subject, plain_body, html_body, dry_run=True):
         "plain_body": plain_body,
         "html_body": html_body,
     }
-
-    if dry_run:
-        result["status"] = "dry_run"
-        return result
-
-    try:
-        # Bypass HTTP(S)_PROXY env vars (same fix as send_postmark.py): Postmark
-        # is publicly reachable and routing through a local proxy is never wanted.
-        _session = requests.Session()
-        _session.trust_env = False
-        resp = _session.post(
-            POSTMARK_API_URL,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "X-Postmark-Server-Token": POSTMARK_SERVER_TOKEN,
-            },
-            json={
-                "From": SENDER_EMAIL,
-                "To": recipient["email"],
-                "Subject": subject,
-                "HtmlBody": html_body,
-                "TextBody": plain_body,
-                "MessageStream": "outbound",
-                "TrackOpens": True,
-                "TrackLinks": "HtmlOnly",
-            },
-            timeout=30,
-        )
-        data = resp.json()
-        if resp.status_code == 200 and data.get("ErrorCode") == 0:
-            result["status"] = "sent"
-            result["postmark_message_id"] = data.get("MessageID", "")
-        else:
-            result["status"] = "error"
-            result["error_code"] = data.get("ErrorCode")
-            result["error_message"] = data.get("Message", "")
-    except Exception as e:
-        result["status"] = "error"
-        result["error_message"] = str(e)
-
-    result["sent_at"] = datetime.now(timezone.utc).isoformat()
+    send_result = postmark_send({
+        "From": SENDER_EMAIL,
+        "To": recipient["email"],
+        "Subject": subject,
+        "HtmlBody": html_body,
+        "TextBody": plain_body,
+        "MessageStream": "outbound",
+        "TrackOpens": True,
+        "TrackLinks": "HtmlOnly",
+    }, dry_run=dry_run)
+    result.update(send_result)
     return result
-
-
-def save_to_db(results):
-    from database.crm_db import upsert_contact, insert_email
-    from database.db_config import get_connection
-
-    conn = get_connection()
-    added = 0
-    for r in results:
-        if r["status"] != "sent":
-            continue
-        upsert_contact(conn, r["email"], r.get("chair_name", ""), r.get("conference", ""))
-        email_id = insert_email(
-            conn, r["email"], r.get("postmark_message_id", ""),
-            r.get("subject", ""), r.get("sent_at", ""),
-            body_text=r.get("plain_body"),
-            body_html=r.get("html_body"),
-        )
-        if email_id:
-            added += 1
-    conn.commit()
-    conn.close()
-    print(f"Database updated: {added} follow-up email(s) recorded")
 
 
 def main():
@@ -208,38 +155,56 @@ def main():
     print(f"Recipients: {len(candidates)}")
     print()
 
+    # Open the DB connection before the loop (when actually sending) so each
+    # successful send is persisted immediately rather than batched to the end.
+    # See send_postmark.py's save_email_result_to_db() docstring for why: a
+    # mid-run crash must never leave a Postmark-delivered email un-recorded,
+    # or it will look "unsent" and get forwarded again on the next run.
+    db_conn = None
+    if not dry_run:
+        from database.db_config import get_connection
+        db_conn = get_connection()
+
     results = []
-    for i, r in enumerate(candidates):
-        original_subject = r["subject"]
-        fwd_subject = f"Fwd: {original_subject}"
+    added = 0
+    try:
+        for i, r in enumerate(candidates):
+            original_subject = r["subject"]
+            fwd_subject = f"Fwd: {original_subject}"
 
-        # follow-up note: still rendered from template (small, simple, only
-        # needs first_name + conference, no platform).
-        followup_text = render(body_template, r["conference"], r["first_name"])
+            # follow-up note: still rendered from template (small, simple, only
+            # needs first_name + conference, no platform).
+            followup_text = render(body_template, r["conference"], r["first_name"])
 
-        # original body: read from DB — exact bytes that were delivered.
-        original_body = r["body_text"]
+            # original body: read from DB — exact bytes that were delivered.
+            original_body = r["body_text"]
 
-        plain_body = build_forwarded_body(
-            followup_text, original_subject, original_body, SENDER_EMAIL
-        )
-        html_body = plain_to_html(plain_body)
+            plain_body = build_forwarded_body(
+                followup_text, original_subject, original_body, SENDER_EMAIL
+            )
+            html_body = plain_to_html(plain_body)
 
-        if i < 3 or dry_run:
-            print(f"--- Follow-up {i+1} ---")
-            print(f"  To:         {r['email']}")
-            print(f"  Name:       {r['chair_name']}  (status: {r['status']})")
-            print(f"  Conf:       {r['conference']}")
-            print(f"  Subject:    {fwd_subject}")
-            if i < 2:
-                print(f"  Body:\n{plain_body}")
-            print()
+            if i < 3 or dry_run:
+                print(f"--- Follow-up {i+1} ---")
+                print(f"  To:         {r['email']}")
+                print(f"  Name:       {r['chair_name']}  (status: {r['status']})")
+                print(f"  Conf:       {r['conference']}")
+                print(f"  Subject:    {fwd_subject}")
+                if i < 2:
+                    print(f"  Body:\n{plain_body}")
+                print()
 
-        result = send_forward(r, fwd_subject, plain_body, html_body, dry_run=dry_run)
-        results.append(result)
+            result = send_forward(r, fwd_subject, plain_body, html_body, dry_run=dry_run)
+            results.append(result)
 
-        if not dry_run and i < len(candidates) - 1:
-            time.sleep(0.5)
+            if not dry_run:
+                if save_email_result_to_db(db_conn, result):
+                    added += 1
+                if i < len(candidates) - 1:
+                    time.sleep(0.5)
+    finally:
+        if db_conn is not None:
+            db_conn.close()
 
     sent = sum(1 for r in results if r["status"] == "sent")
     errors = sum(1 for r in results if r["status"] == "error")
@@ -251,9 +216,7 @@ def main():
         print("Run with --send to actually send")
     else:
         print(f"DONE: {sent} sent, {errors} errors")
-
-    if not dry_run:
-        save_to_db(results)
+        print(f"Database updated: {added} follow-up email(s) recorded")
 
 
 if __name__ == "__main__":
