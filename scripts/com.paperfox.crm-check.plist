@@ -8,11 +8,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/yuhan/email campaign/scripts/run_crm_check.sh</string>
+        <string>/Users/yuhan/paperfox growth/email campaign/scripts/run_crm_check.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/yuhan/email campaign</string>
+    <string>/Users/yuhan/paperfox growth/email campaign</string>
 
     <!--
       Run every Monday at 09:00 local time.
@@ -33,8 +33,8 @@
     <false/>
 
     <key>StandardOutPath</key>
-    <string>/Users/yuhan/email campaign/logs/launchd.stdout.log</string>
+    <string>/Users/yuhan/paperfox growth/email campaign/logs/launchd.stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/yuhan/email campaign/logs/launchd.stderr.log</string>
+    <string>/Users/yuhan/paperfox growth/email campaign/logs/launchd.stderr.log</string>
 </dict>
 </plist>

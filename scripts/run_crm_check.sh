@@ -11,7 +11,7 @@
 
 set -uo pipefail
 
-PROJECT_DIR="/Users/yuhan/email campaign"
+PROJECT_DIR="/Users/yuhan/paperfox growth/email campaign"
 PYTHON_BIN="/Users/yuhan/opt/anaconda3/bin/python"
 LOG_DIR="$PROJECT_DIR/logs"
 LOG_FILE="$LOG_DIR/crm_check.log"

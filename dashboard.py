@@ -12,6 +12,23 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
+
+# st.set_page_config() must be the very first Streamlit *command* the script
+# calls — even touching st.secrets below (in a try/except) counts as an
+# earlier command and makes this raise StreamlitAPIException, so it has to
+# come before that, not just before the visible output further down.
+st.set_page_config(
+    page_title="Email Campaign Dashboard",
+    page_icon="📧",
+    layout="wide",
+)
+
+# Load .env BEFORE the DATABASE_URL check below — otherwise local dev always
+# fails that check even with a correct .env, since nothing had loaded it into
+# os.environ yet (database.db_config does that, but wasn't imported until
+# after the check). Cloud deploys have no .env file, so this is a no-op there.
+load_dotenv()
 
 # Bridge Streamlit Cloud secrets into os.environ BEFORE importing db_config,
 # because get_connection() reads DATABASE_URL via os.getenv. Streamlit
@@ -38,13 +55,6 @@ if not os.environ.get("DATABASE_URL"):
     st.stop()
 
 from database.db_config import get_connection
-
-
-st.set_page_config(
-    page_title="Email Campaign Dashboard",
-    page_icon="📧",
-    layout="wide",
-)
 
 
 # Cold email industry benchmarks (2026 snapshot).

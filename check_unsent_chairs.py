@@ -7,6 +7,8 @@
 crawl 之后过期（不会被自动捡起新文件），需要人工记得去改这份列表。
 也可以用 --files 显式传入文件名列表覆盖自动发现。
 
+Crawl 输出统一存放在 data/ 目录下（2026-07-24 起的项目整理）。
+
 "已发过" = email 在 Neon 生产库 contacts 表里有记录 (等价于 emails 表 >=1 行)
 """
 import argparse
@@ -18,10 +20,11 @@ from database.db_config import get_connection
 
 
 # Glob patterns covering both crawlers' output naming conventions.
+# All crawl output lives under data/ (see project reorg, 2026-07-24).
 CANDIDATE_GLOBS = [
-    "crawled_easychair_*.csv",
-    "crawled_edas_*.csv",
-    "contacts_edas*.csv",
+    "data/crawled_easychair_*.csv",
+    "data/crawled_edas_*.csv",
+    "data/contacts_edas*.csv",
 ]
 
 
@@ -108,7 +111,7 @@ def main():
         print(f"     - {src}: {n}")
 
     # Save full unsent list
-    out_file = "unsent_chairs.csv"
+    out_file = "data/unsent_chairs.csv"
     with open(out_file, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["chair_email", "chair_name", "conference_short_name", "sources"])

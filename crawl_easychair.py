@@ -45,6 +45,7 @@ BAD_EMAIL_PREFIXES = (
     "contact@",
     "office@",
     "secretary@",
+    "registrar@",
     "easychair",
 )
 

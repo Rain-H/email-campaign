@@ -65,22 +65,25 @@ PG_PASSWORD=your_password
 ```bash
 # Optional seed file: [{"conference_short_name": "nlp4call26"}, ...]
 # If the seed has fewer entries than --limit, the crawler fills the rest from the EasyChair index.
+# All crawl output lives under data/ — pass explicit --input/--output paths,
+# since the script's built-in defaults just write to crawled_conferences_v2.json
+# in the project root if you forget to.
 
 python crawl_easychair.py --limit 100 \
-  --input seed_easychair_2026-05-14.json \
-  --output crawled_easychair_2026-05-14.json \
-  --csv-output crawled_easychair_2026-05-14.csv
+  --input data/seed_easychair_2026-05-14.json \
+  --output data/crawled_easychair_2026-05-14.json \
+  --csv-output data/crawled_easychair_2026-05-14.csv
 ```
 
 **EDAS** — two-stage crawl (Stage 1 is fast; Stage 2 visits external websites):
 
 ```bash
 # Stage 1: scrape conference metadata (requires EDAS login)
-python crawl_edas.py --stage 1 --output edas_raw.json
+python crawl_edas.py --stage 1 --output data/edas_raw.json
 
 # Stage 2: extract chairs from external websites
-python crawl_edas.py --stage 2 --input edas_raw.json \
-  --output contacts_edas.json --csv-output contacts_edas.csv
+python crawl_edas.py --stage 2 --input data/edas_raw.json \
+  --output data/contacts_edas.json --csv-output data/contacts_edas.csv
 
 # Retry conferences that returned empty chair data
 python crawl_edas.py --stage 2 --retry
@@ -152,6 +155,7 @@ email campaign/
 │   ├── crm_db.py
 │   ├── db_config.py
 │   └── init_db.py
+├── data/                       # Crawl outputs & CRM exports (gitignored, see below)
 ├── email-template.md           # Original template (v1)
 ├── email-template-v2.md        # Outreach template (default for follow-up forwards)
 ├── email-template-v3.md        # Alternate outreach template
@@ -165,7 +169,7 @@ email campaign/
 
 ### Data Files (generated, gitignored)
 
-Crawl outputs and CRM exports are kept locally but not committed to git. Use dated filenames to track batches.
+Crawl outputs and CRM exports live under `data/`, kept locally but not committed to git. Use dated filenames to track batches. (`.gitignore`'s patterns like `crawled_*.csv` match regardless of directory depth, so this move didn't require touching `.gitignore`.)
 
 | File pattern | Source | Description |
 |--------------|--------|-------------|
