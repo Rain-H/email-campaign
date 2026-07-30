@@ -309,7 +309,7 @@ def get_claude_client():
 def ask_claude_json(client, prompt: str) -> Dict:
     try:
         msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=1400,
             messages=[{"role": "user", "content": prompt}],
         )

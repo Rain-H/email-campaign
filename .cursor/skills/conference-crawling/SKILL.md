@@ -192,7 +192,7 @@ Return JSON: {"valid": true/false, "reason": "brief explanation"}
 
 ## Claude API Usage
 
-Send preprocessed HTML (strip `<script>`, `<style>`, `<nav>`, `<footer>`, limit ~4000 chars around relevant section) to Claude with structured extraction prompt. Model: `claude-sonnet-4-20250514`.
+Send preprocessed HTML (strip `<script>`, `<style>`, `<nav>`, `<footer>`, limit ~4000 chars around relevant section) to Claude with structured extraction prompt. Model: `claude-sonnet-4-6`.
 
 Cost estimate: ~100 conferences × ~2-3 calls each × ~$0.01 = ~$2-3 total.
 

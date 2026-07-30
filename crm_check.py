@@ -42,6 +42,10 @@ EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS") or os.getenv("POSTMARK_SENDER_EMAIL")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+ANTHROPIC_CLASSIFICATION_MODEL = os.getenv(
+    "ANTHROPIC_CLASSIFICATION_MODEL",
+    "claude-sonnet-4-6",
+)
 
 
 # ====================================================================
@@ -809,7 +813,7 @@ def classify_replies(conn) -> int:
             body = reply.get("full_content") or reply.get("reply_snippet", "")
             prompt = CLASSIFY_PROMPT.format(body=body)
             response = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=ANTHROPIC_CLASSIFICATION_MODEL,
                 max_tokens=200,
                 messages=[{"role": "user", "content": prompt}],
             )
