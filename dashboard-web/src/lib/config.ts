@@ -1,5 +1,4 @@
 export const AUTO_REFRESH_MS = 45_000;
 
-export const WEEKS_MIN = 4;
-export const WEEKS_MAX = 20;
-export const WEEKS_DEFAULT = 12;
+// Weekly trends are fixed to the most recent 4 weeks (no user-adjustable range).
+export const WEEKS_SHOWN = 4;

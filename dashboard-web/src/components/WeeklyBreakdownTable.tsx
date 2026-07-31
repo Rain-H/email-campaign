@@ -5,8 +5,7 @@ export default function WeeklyBreakdownTable({ data }: { data: WeekRow[] }) {
   return (
     <ChartTableFallback
       rows={data.map((d) => ({
-        Week: d.week,
-        Start: d.weekStart,
+        Week: d.label,
         New: d.newSent,
         "Follow-up": d.followupSent,
         Sent: d.sent,
@@ -15,7 +14,6 @@ export default function WeeklyBreakdownTable({ data }: { data: WeekRow[] }) {
       }))}
       columns={[
         { key: "Week", label: "Week" },
-        { key: "Start", label: "Start" },
         { key: "New", label: "New", align: "right" },
         { key: "Follow-up", label: "Follow-up", align: "right" },
         { key: "Sent", label: "Sent", align: "right" },

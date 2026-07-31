@@ -13,10 +13,9 @@ export interface TotalStats {
 }
 
 export interface WeekRow {
-  week: string; // "W30"
+  label: string; // "Jul 27–Aug 2"
   weekNum: number;
   year: number;
-  weekStart: string; // "07/24"
   sent: number;
   newSent: number;
   followupSent: number;

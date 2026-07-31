@@ -26,7 +26,7 @@ export default function WeeklySentChart({ data }: { data: WeekRow[] }) {
           strokeWidth={1}
         />
         <XAxis
-          dataKey="week"
+          dataKey="label"
           tick={{ fill: "var(--text-muted)", fontSize: 12 }}
           axisLine={{ stroke: COLOR.baseline }}
           tickLine={false}
@@ -60,7 +60,7 @@ export default function WeeklySentChart({ data }: { data: WeekRow[] }) {
   const table = (
     <ChartTableFallback
       rows={data.map((d) => ({
-        Week: d.week,
+        Week: d.label,
         New: d.newSent,
         "Follow-up": d.followupSent,
       }))}

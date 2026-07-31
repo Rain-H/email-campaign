@@ -1,4 +1,3 @@
-import { Suspense } from "react";
 import {
   getInterestedContacts,
   getPlatformStats,
@@ -6,11 +5,10 @@ import {
   getTotalStats,
   getWeeklyData,
 } from "@/lib/queries";
-import { WEEKS_DEFAULT, WEEKS_MAX, WEEKS_MIN } from "@/lib/config";
+import { WEEKS_SHOWN } from "@/lib/config";
 import AutoRefresh from "@/components/AutoRefresh";
 import RefreshButton from "@/components/RefreshButton";
 import StatCardRow from "@/components/StatCardRow";
-import WeeksSlider from "@/components/WeeksSlider";
 import InterestedContactsTable from "@/components/InterestedContactsTable";
 import RecentRepliesList from "@/components/RecentRepliesList";
 import WeeklyBreakdownTable from "@/components/WeeklyBreakdownTable";
@@ -26,24 +24,11 @@ import PlatformBreakdownChart from "@/components/charts/PlatformBreakdownChart";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-function clampWeeks(raw: string | undefined): number {
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return WEEKS_DEFAULT;
-  return Math.min(WEEKS_MAX, Math.max(WEEKS_MIN, Math.round(n)));
-}
-
-export default async function DashboardPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ weeks?: string }>;
-}) {
-  const params = await searchParams;
-  const weeks = clampWeeks(params.weeks);
-
+export default async function DashboardPage() {
   const [total, weeklyData, recentReplies, platformStats, interestedContacts] =
     await Promise.all([
       getTotalStats(),
-      getWeeklyData(weeks),
+      getWeeklyData(WEEKS_SHOWN),
       getRecentReplies(10),
       getPlatformStats(),
       getInterestedContacts(),
@@ -68,19 +53,9 @@ export default async function DashboardPage({
       <StatCardRow total={total} />
 
       <section style={{ marginTop: 32 }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: 12,
-          }}
-        >
-          <h2 style={{ fontSize: 16, fontWeight: 600 }}>📈 Weekly Trends</h2>
-          <Suspense fallback={null}>
-            <WeeksSlider value={weeks} />
-          </Suspense>
-        </div>
+        <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>
+          📈 Weekly Trends (last {WEEKS_SHOWN} weeks)
+        </h2>
         <div
           style={{
             display: "grid",

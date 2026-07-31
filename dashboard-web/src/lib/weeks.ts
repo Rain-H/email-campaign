@@ -12,10 +12,9 @@
 // Streamlit dashboard's numbers exactly rather than silently diverging.
 
 export interface WeekRange {
-  week: string; // "W30"
+  label: string; // "Jul 27–Aug 2" — the week's date range, shown on axes/tables
   weekNum: number;
   year: number;
-  weekStartLabel: string; // "07/24"
   weekStart: Date;
   weekEnd: Date;
 }
@@ -34,8 +33,21 @@ function isoWeekOf(date: Date): { isoYear: number; isoWeek: number } {
   return { isoYear, isoWeek };
 }
 
-function pad2(n: number): string {
-  return n.toString().padStart(2, "0");
+const MONTHS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+// "Jul 27–Aug 2", collapsing to "Jul 6–12" when the week doesn't cross a month.
+// UTC getters only — weekStart/weekEnd are UTC instants (see file header).
+function formatRange(start: Date, end: Date): string {
+  const startMonth = MONTHS[start.getUTCMonth()];
+  const endMonth = MONTHS[end.getUTCMonth()];
+  const startDay = start.getUTCDate();
+  const endDay = end.getUTCDate();
+  return startMonth === endMonth
+    ? `${startMonth} ${startDay}–${endDay}`
+    : `${startMonth} ${startDay}–${endMonth} ${endDay}`;
 }
 
 export function getWeekRanges(numWeeks: number): WeekRange[] {
@@ -62,12 +74,9 @@ export function getWeekRanges(numWeeks: number): WeekRange[] {
     const weekEnd = new Date(weekEndMs);
 
     ranges.push({
-      week: `W${week}`,
+      label: formatRange(weekStart, weekEnd),
       weekNum: week,
       year,
-      weekStartLabel: `${pad2(weekStart.getUTCMonth() + 1)}/${pad2(
-        weekStart.getUTCDate()
-      )}`,
       weekStart,
       weekEnd,
     });

@@ -52,6 +52,15 @@ non-trivial piece is `src/lib/weeks.ts`, which re-implements `dashboard.py`'s UT
 ISO-week bucketing (including its `week -= 52` year-rollover simplification,
 deliberately not "fixed" so week boundaries match the existing dashboard exactly).
 
+Two things deliberately diverge from `dashboard.py` (presentation only — the bucket
+boundaries and SQL are still identical):
+
+- The weekly window is **fixed at the most recent 4 weeks** (`WEEKS_SHOWN` in
+  `src/lib/config.ts`); there is no user-adjustable range control.
+- Weeks are labelled by date range (`Jul 27–Aug 2`, collapsing to `Jul 6–12` within a
+  month) instead of ISO week number (`W31`). `weekNum`/`year` are still carried on
+  each `WeekRow` if you need to cross-check against the Streamlit dashboard.
+
 ## Optional hardening
 
 This DB URL sits in a Vercel env var backing a public, unauthenticated page. Consider

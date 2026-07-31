@@ -101,10 +101,9 @@ export async function getWeeklyData(numWeeks: number): Promise<WeekRow[]> {
       const followupSent = Number(sentRows[0].followup_sent);
 
       const row: WeekRow = {
-        week: r.week,
+        label: r.label,
         weekNum: r.weekNum,
         year: r.year,
-        weekStart: r.weekStartLabel,
         sent: newSent + followupSent,
         newSent,
         followupSent,

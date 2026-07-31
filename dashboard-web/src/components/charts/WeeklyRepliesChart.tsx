@@ -22,7 +22,7 @@ export default function WeeklyRepliesChart({ data }: { data: WeekRow[] }) {
       <BarChart data={data} barGap={2} barCategoryGap="20%">
         <CartesianGrid vertical={false} stroke={COLOR.gridline} strokeWidth={1} />
         <XAxis
-          dataKey="week"
+          dataKey="label"
           tick={{ fill: "var(--text-muted)", fontSize: 12 }}
           axisLine={{ stroke: COLOR.baseline }}
           tickLine={false}
@@ -53,7 +53,7 @@ export default function WeeklyRepliesChart({ data }: { data: WeekRow[] }) {
   const table = (
     <ChartTableFallback
       rows={data.map((d) => ({
-        Week: d.week,
+        Week: d.label,
         Replies: d.replies,
         Interested: d.interested,
       }))}
