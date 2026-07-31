@@ -51,3 +51,10 @@ replies_review.txt
 # Test fixture for send_postmark.py --test / send_followup.py --test
 # (README documents this as "local, not in git" — actually enforce that).
 test_data.csv
+
+# dashboard-web/ (Next.js) — dashboard-web/.gitignore is authoritative for
+# that subdirectory; this is just a safety net at the repo root.
+node_modules/
+.next/
+.vercel/
+*.tsbuildinfo

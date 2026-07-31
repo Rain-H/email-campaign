@@ -1,0 +1,109 @@
+/* Palette: validated default from the dataviz skill (references/palette.md).
+   Light values are the base; dark values apply under both the OS
+   prefers-color-scheme AND an explicit [data-theme="dark"] stamp (there's no
+   theme toggle in this app yet, but wiring both now costs nothing and keeps
+   this file correct if one is added later). */
+:root {
+  color-scheme: light;
+
+  --surface-1: #fcfcfb; /* chart surface */
+  --surface-page: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --gridline: #e1e0d9;
+  --baseline: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.1);
+  --success-text: #006300;
+
+  /* categorical, fixed order — never reassign when a series is hidden */
+  --series-1: #2a78d6; /* blue */
+  --series-2: #eb6834; /* orange */
+  --series-3: #1baf7a; /* aqua */
+
+  /* sequential blue ramp — ordinal use (funnel stages): light no lighter than 250 */
+  --seq-250: #86b6ef;
+  --seq-350: #5598e7;
+  --seq-450: #2a78d6;
+  --seq-550: #1c5cab;
+
+  /* status — fixed hex, mode-invariant, always paired with icon + label */
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+
+    --surface-1: #1a1a19;
+    --surface-page: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --gridline: #2c2c2a;
+    --baseline: #383835;
+    --border: rgba(255, 255, 255, 0.1);
+    --success-text: #0ca30c;
+
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --surface-1: #1a1a19;
+  --surface-page: #0d0d0d;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --gridline: #2c2c2a;
+  --baseline: #383835;
+  --border: rgba(255, 255, 255, 0.1);
+  --success-text: #0ca30c;
+
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+}
+
+html {
+  height: 100%;
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+body {
+  min-height: 100%;
+  color: var(--text-primary);
+  background: var(--surface-page);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+a {
+  color: inherit;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
