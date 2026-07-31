@@ -10,4 +10,4 @@ See how it works → https://www.paperfox.ai/pricing
 
 Best,
 Rain Jiang
-COO | PaperFox.ai
+Head of Operations | [PaperFox.ai](https://www.paperfox.ai/)
