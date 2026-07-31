@@ -23,8 +23,9 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
@@ -33,8 +34,18 @@ load_dotenv()
 
 # ---------- config ----------
 
+# Reply-vs-sent-time comparisons are always done in US Eastern, regardless of
+# the host machine's system timezone/clock (which can't be trusted — see
+# check_replies()). Do not use datetime.astimezone() with no args for this.
+US_EASTERN = ZoneInfo("America/New_York")
+
 POSTMARK_SERVER_TOKEN = os.getenv("POSTMARK_SERVER_TOKEN")
 POSTMARK_API = "https://api.postmarkapp.com"
+# The Postmark server is shared with other PaperFox product emails (e.g.
+# notifications@paperfox.ai) — cold campaign emails always come from this
+# address. Used to filter /messages/outbound server-side so bulk sync doesn't
+# pull in unrelated traffic (see sync_postmark_bulk()).
+POSTMARK_SENDER_EMAIL = os.getenv("POSTMARK_SENDER_EMAIL", "rain@paperfox.ai")
 
 IMAP_SERVER = os.getenv("IMAP_SERVER", "mail.privateemail.com")
 IMAP_PORT = int(os.getenv("IMAP_PORT", "993"))
@@ -226,6 +237,48 @@ def _paginate_postmark(endpoint: str, params: Optional[Dict] = None,
             return
 
 
+def _date_chunks(from_date: str, to_date: Optional[str] = None, chunk_days: int = 30):
+    """Yield (chunk_from, chunk_to) date strings (YYYY-MM-DD) covering
+    [from_date, to_date] in chunk_days-sized inclusive windows. to_date
+    defaults to today (UTC)."""
+    start = datetime.strptime(from_date, "%Y-%m-%d").date()
+    end = (datetime.strptime(to_date, "%Y-%m-%d").date() if to_date
+           else datetime.now(timezone.utc).date())
+    cur = start
+    while cur <= end:
+        chunk_end = min(cur + timedelta(days=chunk_days - 1), end)
+        yield cur.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")
+        cur = chunk_end + timedelta(days=1)
+
+
+def _paginate_postmark_windowed(endpoint: str, params: Optional[Dict], from_date: Optional[str],
+                                page_size: int = 500, results_key: str = "Messages",
+                                chunk_days: int = 30):
+    """Like _paginate_postmark, but splits [from_date, today] into chunk_days
+    windows and queries each window separately.
+
+    Needed for endpoints that can't be filtered by sender email (/bounces,
+    /opens, /clicks): on a shared Postmark account with heavy unrelated
+    traffic, one query spanning a whole multi-month campaign can return more
+    items than Postmark's ~10000 offset+count pagination ceiling and fail
+    with a 422 partway through. Chunking keeps each individual query's
+    TotalCount well under that ceiling no matter how long the campaign has
+    been running — narrowing just the start date (an earlier version of this
+    code tried that) does NOT fix this, since the ceiling is about how much
+    activity falls *inside* the window, not how far back the window starts.
+    """
+    if not from_date:
+        yield from _paginate_postmark(endpoint, params, page_size, results_key)
+        return
+    for chunk_from, chunk_to in _date_chunks(from_date, chunk_days=chunk_days):
+        chunk_params = dict(params or {}, fromdate=chunk_from, todate=chunk_to)
+        pages = 0
+        for items, fetched, total in _paginate_postmark(endpoint, chunk_params, page_size, results_key):
+            pages += 1
+            print(f"      [{chunk_from}..{chunk_to}] page {pages}: scanned {fetched}/{total}")
+            yield items, fetched, total
+
+
 def sync_postmark_bulk(conn, from_date: Optional[str] = None,
                        page_size: int = 500) -> int:
     """Bulk Postmark sync using batch endpoints. Returns count of updated contacts.
@@ -236,8 +289,8 @@ def sync_postmark_bulk(conn, from_date: Optional[str] = None,
 
     Args:
         from_date: Optional 'YYYY-MM-DD' to limit bulk queries to messages on/after
-                   this date. Greatly reduces pages fetched when the Postmark account
-                   has unrelated messages (product emails, support tickets, etc.).
+                   this date. Defaults to the day before our earliest tracked send
+                   (see below) if not given.
         page_size: Page size for each bulk endpoint (Postmark max is 500).
     """
     from database.crm_db import (
@@ -255,25 +308,66 @@ def sync_postmark_bulk(conn, from_date: Optional[str] = None,
         print("  No tracked messages found, nothing to sync.")
         return 0
 
-    common_params: Dict = {}
+    if not from_date:
+        # Default to the day before our earliest tracked send, so the sync
+        # covers the whole campaign without guessing an arbitrary lookback
+        # window. This is about not missing our own old messages — it does
+        # NOT protect against the pagination ceiling below (see
+        # _paginate_postmark_windowed's docstring for why not).
+        sent_dates = [c["sent_at"] for c in contacts if c.get("sent_at")]
+        if sent_dates:
+            from_date = (min(sent_dates) - timedelta(days=1)).strftime("%Y-%m-%d")
     if from_date:
-        common_params["fromdate"] = from_date
         print(f"  Bulk sync for {len(our_msg_ids)} tracked messages (fromdate={from_date})...")
     else:
         print(f"  Bulk sync for {len(our_msg_ids)} tracked messages...")
 
     updated_ids: set = set()
 
-    # 1. Message status (Sent/Processed -> delivered; Bounced flagged here, details from /bounces below)
-    print("    [1/4] /messages/outbound (status & delivery)...")
+    # 1. Bounces first (gives BouncedAt + Type). Must run before step 2 —
+    # /messages/outbound's Status field only means "accepted by Postmark for
+    # sending", not a delivery confirmation from the recipient's mail server
+    # (that requires the per-message /details endpoint's "Delivered" event,
+    # which sync_postmark_for_contact() uses). Fetching bounces first lets us
+    # skip marking a bounced message as delivered_at below, instead of
+    # setting both and letting the contact_status view's bounce-wins CASE
+    # mask the contradiction while the funnel report double-counts it.
+    print("    [1/4] /bounces (bounce details)...")
+    bounced_ids: set = set()
+    for items, fetched, total in _paginate_postmark_windowed(
+        "/bounces", {}, from_date, page_size, results_key="Bounces"
+    ):
+        for b in items:
+            msg_id = b.get("MessageID")
+            if msg_id not in our_msg_ids:
+                continue
+            bounced_at = b.get("BouncedAt", "")
+            bounce_type = b.get("Type", "unknown")
+            update_bounce(conn, msg_id, bounced_at, bounce_type)
+            bounced_ids.add(msg_id)
+            updated_ids.add(msg_id)
+    conn.commit()
+
+    # 2. Message status (Sent/Processed -> delivered), skipping anything we
+    # now know bounced. Filtered server-side by fromemail — this account's
+    # /messages/outbound also contains unrelated PaperFox product email
+    # traffic (see POSTMARK_SENDER_EMAIL comment above), and without this
+    # filter the endpoint can return far more rows than our tracked messages.
+    # Only this endpoint supports fromemail; /bounces, /opens, /clicks don't,
+    # so those use _paginate_postmark_windowed (date-chunked) instead to
+    # avoid Postmark's offset+count pagination ceiling (~10000, 422).
+    print("    [2/4] /messages/outbound (status & delivery)...")
+    outbound_params: Dict = {"fromemail": POSTMARK_SENDER_EMAIL}
+    if from_date:
+        outbound_params["fromdate"] = from_date
     pages = 0
     for items, fetched, total in _paginate_postmark(
-        "/messages/outbound", common_params, page_size, results_key="Messages"
+        "/messages/outbound", outbound_params, page_size, results_key="Messages"
     ):
         pages += 1
         for m in items:
             msg_id = m.get("MessageID")
-            if msg_id not in our_msg_ids:
+            if msg_id not in our_msg_ids or msg_id in bounced_ids:
                 continue
             status = m.get("Status", "")
             received_at = m.get("ReceivedAt", "")
@@ -283,30 +377,25 @@ def sync_postmark_bulk(conn, from_date: Optional[str] = None,
         print(f"      page {pages}: scanned {fetched}/{total}")
     conn.commit()
 
-    # 2. Bounces (gives BouncedAt + Type)
-    print("    [2/4] /bounces (bounce details)...")
-    pages = 0
-    for items, fetched, total in _paginate_postmark(
-        "/bounces", common_params, page_size, results_key="Bounces"
-    ):
-        pages += 1
-        for b in items:
-            msg_id = b.get("MessageID")
-            if msg_id not in our_msg_ids:
-                continue
-            bounced_at = b.get("BouncedAt", "")
-            bounce_type = b.get("Type", "unknown")
-            update_bounce(conn, msg_id, bounced_at, bounce_type)
-            updated_ids.add(msg_id)
-        print(f"      page {pages}: scanned {fetched}/{total}")
-    conn.commit()
-
-    # 3. Opens (aggregate count + earliest timestamp per message)
+    # 3. Opens (aggregate count + earliest timestamp per message).
+    # NOT windowed: confirmed by direct testing (2026-07-31) that this
+    # endpoint silently ignores fromdate/todate entirely — TotalCount is
+    # identical whether queried with no filter or a narrow one-week window.
+    # So date-chunking here would just re-scan the same full account on
+    # every chunk for no benefit. There is no known server-side way to
+    # narrow this query to our own messages or a date range; the only real
+    # fix would be reverting to per-contact calls with `recipient=`, which
+    # reintroduces the N-calls-per-contact problem this bulk path exists to
+    # avoid. Practical result: only the first ~10000 opens account-wide are
+    # visible before hitting Postmark's pagination ceiling (422, caught
+    # below); anything beyond that is silently missed. Acceptable in
+    # practice since the funnel report already flags open counts as
+    # "approx, pixel-based, unreliable".
     print("    [3/4] /messages/outbound/opens...")
     opens_by_msg: Dict[str, List[str]] = {}
     pages = 0
     for items, fetched, total in _paginate_postmark(
-        "/messages/outbound/opens", common_params, page_size, results_key="Opens"
+        "/messages/outbound/opens", {}, page_size, results_key="Opens"
     ):
         pages += 1
         for o in items:
@@ -324,12 +413,13 @@ def sync_postmark_bulk(conn, from_date: Optional[str] = None,
         updated_ids.add(msg_id)
     conn.commit()
 
-    # 4. Clicks (earliest timestamp per message)
+    # 4. Clicks (earliest timestamp per message). Same caveat as opens above
+    # — /messages/outbound/clicks also ignores fromdate/todate (confirmed).
     print("    [4/4] /messages/outbound/clicks...")
     clicks_by_msg: Dict[str, str] = {}
     pages = 0
     for items, fetched, total in _paginate_postmark(
-        "/messages/outbound/clicks", common_params, page_size, results_key="Clicks"
+        "/messages/outbound/clicks", {}, page_size, results_key="Clicks"
     ):
         pages += 1
         for c in items:
@@ -544,7 +634,11 @@ def check_replies(conn, since_days: int = 30) -> int:
             if contact_email in seen_contacts:
                 continue
             seen_contacts.add(contact_email)
-            
+
+            checked += 1
+            if checked % 100 == 0:
+                print(f"    Checked {checked}/{len(contacts)} contacts...")
+
             search_criteria = f'(SINCE "{since_date}" FROM "{contact_email}")'
             try:
                 status, messages = mail.search(None, search_criteria)
@@ -582,9 +676,15 @@ def check_replies(conn, since_days: int = 30) -> int:
                     sent_at_str = str(contact.get("sent_at", ""))
                     if reply_date and sent_at_str:
                         try:
+                            # sent_at is stored naive but always in UTC (see
+                            # _parse_timestamp() in database/crm_db.py) — tag
+                            # it explicitly rather than letting astimezone()
+                            # guess based on the host's system timezone/clock.
                             sent_dt = datetime.fromisoformat(sent_at_str.replace("Z", "+00:00"))
-                            sent_dt = sent_dt.astimezone()
-                            reply_date_tz = reply_date.astimezone()
+                            if sent_dt.tzinfo is None:
+                                sent_dt = sent_dt.replace(tzinfo=timezone.utc)
+                            sent_dt = sent_dt.astimezone(US_EASTERN)
+                            reply_date_tz = reply_date.astimezone(US_EASTERN)
                             if reply_date_tz < sent_dt:
                                 continue
                         except Exception:
@@ -620,11 +720,7 @@ def check_replies(conn, since_days: int = 30) -> int:
                           f"(subject: {chosen['subject'][:50]}){verified_tag}")
 
             except Exception as e:
-                pass
-
-            checked += 1
-            if checked % 100 == 0:
-                print(f"    Checked {checked}/{len(contacts)} contacts...")
+                print(f"    ! Error checking replies for {contact_email}: {e}")
 
         conn.commit()
         mail.logout()
@@ -680,7 +776,7 @@ def sync_sent_emails(conn, since_days: int = 60) -> int:
                     print(f"  Connected to {folder}")
                     selected = True
                     break
-            except:
+            except Exception:
                 continue
         
         if not selected:
@@ -719,7 +815,7 @@ def sync_sent_emails(conn, since_days: int = 60) -> int:
                         try:
                             from email.utils import parsedate_to_datetime
                             sent_at = parsedate_to_datetime(date_str).strftime("%Y-%m-%d %H:%M:%S")
-                        except:
+                        except Exception:
                             pass
                     
                     if not sent_at:
@@ -755,6 +851,7 @@ def sync_sent_emails(conn, since_days: int = 60) -> int:
                         print(f"    Synced sent email to {original_email}: {subject[:40]}")
 
             except Exception as e:
+                print(f"    ! Error syncing sent emails to {original_email}: {e}")
                 continue
 
         conn.commit()
@@ -934,7 +1031,7 @@ def main():
                         help="Use the slow per-contact Postmark sync instead of the default bulk-API mode")
     parser.add_argument("--from-date", type=str, default=None,
                         help="Bulk-mode only: limit Postmark queries to messages on/after YYYY-MM-DD "
-                             "(default: 120 days before today)")
+                             "(default: the day before our earliest tracked send)")
     parser.add_argument("--start-from", type=int, default=0,
                         help="Per-contact mode only: resume from this 0-based contact index")
     parser.add_argument("--commit-every", type=int, default=50,
@@ -960,13 +1057,10 @@ def main():
     # Step 1: Postmark status sync
     if full_sync or args.postmark_only:
         print("\n[Step 1] Checking Postmark delivery/open/click status...")
-        from_date = args.from_date
-        if not args.per_contact and from_date is None:
-            from_date = (datetime.utcnow() - timedelta(days=120)).strftime("%Y-%m-%d")
         sync_postmark(
             conn,
             bulk=not args.per_contact,
-            from_date=from_date,
+            from_date=args.from_date,
             start_from=args.start_from,
             commit_every=args.commit_every,
         )

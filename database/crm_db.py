@@ -161,9 +161,14 @@ def update_delivery(conn, postmark_message_id: str, delivered_at: str):
 
 
 def update_bounce(conn, postmark_message_id: str, bounced_at: str, bounce_type: str):
+    """Record a bounce. Also clears delivered_at: a bounced message was never
+    actually delivered, but an earlier sync (particularly the bulk path, which
+    approximates delivered_at from Postmark's "Sent"/"Processed" status rather
+    than a real delivery confirmation) may have already set it before the
+    bounce was known."""
     cur = conn.cursor()
     cur.execute("""
-        UPDATE emails SET bounced_at = %s, bounce_type = %s
+        UPDATE emails SET bounced_at = %s, bounce_type = %s, delivered_at = NULL
         WHERE postmark_message_id = %s AND bounced_at IS NULL
     """, (_parse_timestamp(bounced_at), bounce_type, postmark_message_id))
     cur.close()
@@ -181,11 +186,25 @@ def update_open(conn, postmark_message_id: str, opened_at: str, open_count: int)
 
 
 def update_click(conn, postmark_message_id: str, clicked_at: str):
+    """Record a click. Also backfills opened_at/open_count (using the click
+    time as a lower-bound approximation of when it was opened) whenever
+    they're not already set — clicking a link inside the email necessarily
+    means it was opened, even if the /opens bulk endpoint never reported it.
+    That's a real gap: /opens can't be filtered by date (see
+    sync_postmark_bulk() in crm_check.py) and silently truncates past
+    Postmark's ~10000-item pagination ceiling, so some real opens never make
+    it into `emails` any other way. COALESCE/GREATEST make this idempotent
+    across repeated syncs, so it also backfills older rows that were clicked
+    before this backfill existed."""
     cur = conn.cursor()
+    ts = _parse_timestamp(clicked_at)
     cur.execute("""
-        UPDATE emails SET clicked_at = %s
-        WHERE postmark_message_id = %s AND clicked_at IS NULL
-    """, (_parse_timestamp(clicked_at), postmark_message_id))
+        UPDATE emails
+        SET clicked_at = COALESCE(clicked_at, %s),
+            opened_at = COALESCE(opened_at, %s),
+            open_count = GREATEST(open_count, 1)
+        WHERE postmark_message_id = %s
+    """, (ts, ts, postmark_message_id))
     cur.close()
 
 
@@ -348,7 +367,7 @@ def get_contacts_for_sync(conn) -> List[Dict]:
     """
     cur = conn.cursor()
     cur.execute("""
-        SELECT email, postmark_message_id, email_id, status
+        SELECT email, postmark_message_id, email_id, status, sent_at
         FROM contact_status
         WHERE postmark_message_id IS NOT NULL
           AND status != 'failed'

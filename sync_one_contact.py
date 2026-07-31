@@ -15,7 +15,7 @@ import email as email_lib
 import imaplib
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
@@ -26,6 +26,7 @@ from crm_check import (  # noqa: E402  reuse existing helpers
     extract_email_address,
     get_email_body,
     is_auto_reply,
+    is_reply_to_campaign,
     parse_email_date,
 )
 from database.crm_db import insert_conversation, insert_reply  # noqa: E402
@@ -76,14 +77,26 @@ def sync_contact(target_email: str) -> None:
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, subject, sent_at FROM emails WHERE contact_email = %s ORDER BY sent_at ASC LIMIT 1",
+        "SELECT id, subject, sent_at, postmark_message_id FROM emails "
+        "WHERE contact_email = %s ORDER BY sent_at ASC LIMIT 1",
         (target,),
     )
     row = cur.fetchone()
     cur.close()
     original_email_id = row[0] if row else None
+    original_subject = row[1] if row else ""
+    original_sent_at = row[2] if row else None
+    if original_sent_at is not None and original_sent_at.tzinfo is None:
+        # sent_at is stored naive but always in UTC (see _parse_timestamp()
+        # in database/crm_db.py) — tag it explicitly so the < comparison
+        # below is correct regardless of this machine's clock/timezone.
+        original_sent_at = original_sent_at.replace(tzinfo=timezone.utc)
+    original_contact = {
+        "postmark_message_id": row[3] if row else "",
+        "subject": original_subject,
+    }
     if original_email_id:
-        print(f"  Original outbound email_id={original_email_id}")
+        print(f"  Original outbound email_id={original_email_id}, sent_at={original_sent_at}")
     else:
         print("  ⚠ No prior outbound email found in DB; replies won't be linked via email_id.")
     print()
@@ -99,6 +112,7 @@ def sync_contact(target_email: str) -> None:
 
     print("→ INBOX (inbound from contact):")
     inbox_criteria = f'(FROM "{target}")'
+    reply_candidates = []
     for msg in _fetch_messages(mail, "INBOX", inbox_criteria):
         from_header = decode_mime_header(msg.get("From", ""))
         from_email = extract_email_address(from_header)
@@ -122,11 +136,34 @@ def sync_contact(target_email: str) -> None:
         else:
             print(f"    = dedup     {msg_at_iso[:19]}  '{subject[:55]}'")
 
-        if original_email_id:
-            rid = insert_reply(conn, original_email_id, date_str, body, False)
-            if rid:
-                new_replies += 1
-                print(f"      → also inserted reply #{rid} (needs classification)")
+        if not original_email_id:
+            continue
+        # Full history still lands in `conversations` above regardless, but
+        # only messages sent on/after the original campaign email — and
+        # ideally matching its thread/subject — are eligible to become "the
+        # reply" (insert_reply -> contact_status.replied_at). Without this,
+        # any pre-existing correspondence with this address (e.g. from
+        # before the campaign) could get misattributed as a campaign reply.
+        if original_sent_at is not None and parsed_dt is not None and parsed_dt < original_sent_at:
+            print(f"      (older than original send — not treated as a reply)")
+            continue
+        reply_candidates.append({
+            "date_str": date_str,
+            "body": body,
+            "subject": subject,
+            "verified": is_reply_to_campaign(msg, original_contact),
+        })
+
+    if original_email_id and reply_candidates:
+        chosen = next((c for c in reply_candidates if c["verified"]), reply_candidates[0])
+        if not chosen["verified"]:
+            print(f"    ! No campaign-thread match; using earliest post-send email as "
+                  f"best guess (subject: {chosen['subject'][:50]!r})")
+        rid = insert_reply(conn, original_email_id, chosen["date_str"], chosen["body"], False)
+        if rid:
+            new_replies += 1
+            tag = "" if chosen["verified"] else " [unverified]"
+            print(f"      → inserted reply #{rid} (needs classification){tag}")
 
     print()
     print("→ Sent (outbound to contact):")
@@ -168,7 +205,12 @@ def sync_contact(target_email: str) -> None:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("email", help="Contact email to sync")
+    parser.add_argument("--test", action="store_true",
+                        help="Use test database (crm_test) instead of production")
     args = parser.parse_args()
+    if args.test:
+        os.environ["USE_TEST_DB"] = "1"
+        print("[TEST MODE] Using test database crm_test\n")
     sync_contact(args.email)
 
 
