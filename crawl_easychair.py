@@ -531,7 +531,7 @@ Rules:
 """
     try:
         response = openai_client.responses.create(
-            model="gpt-4o-mini",
+            model="gpt-5-mini",
             tools=[{"type": "web_search"}],
             input=prompt,
         )
@@ -590,7 +590,7 @@ Rules:
 """
     try:
         response = openai_client.responses.create(
-            model="gpt-4o-mini",
+            model="gpt-5-mini",
             tools=[{"type": "web_search"}],
             input=prompt,
         )
