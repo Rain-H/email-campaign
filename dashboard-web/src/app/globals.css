@@ -76,9 +76,11 @@ html {
   height: 100%;
 }
 
-html,
+/* Backstop only — every genuinely wide element (tables) carries its own
+   .table-scroll container, so the page body should never actually need to
+   scroll sideways. Note: no `max-width: 100vw` here; 100vw includes the
+   vertical scrollbar's width and so overflows on desktop. */
 body {
-  max-width: 100vw;
   overflow-x: hidden;
 }
 
@@ -106,4 +108,77 @@ table {
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------------------
+   Layout
+
+   These live here rather than as inline styles because they need media
+   queries. The phone breakpoint is 560px — keep it in sync with NARROW_QUERY
+   in src/lib/useIsNarrow.ts, which drives the same breakpoint for the chart
+   internals that CSS can't reach (Recharts sizes/labels).
+   --------------------------------------------------------------------------- */
+
+.page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px 20px 60px;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.page-title {
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.section {
+  margin-top: 32px;
+}
+
+.section-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+/* min() is what makes these grids safe on a phone: a bare minmax(420px, 1fr)
+   track can't shrink below 420px, so it overflows any narrower viewport. */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
+  gap: 12px;
+}
+
+.split-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
+  gap: 16px;
+}
+
+/* Wide tables scroll inside their own box instead of widening the page. */
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 560px) {
+  .page {
+    padding: 16px 12px 40px;
+  }
+
+  .page-title {
+    font-size: 18px;
+  }
+
+  .section {
+    margin-top: 24px;
+  }
 }

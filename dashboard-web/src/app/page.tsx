@@ -35,51 +35,29 @@ export default async function DashboardPage() {
     ]);
 
   return (
-    <main style={{ maxWidth: 1200, margin: "0 auto", padding: "24px 20px 60px" }}>
+    <main className="page">
       <AutoRefresh />
 
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginBottom: 20,
-        }}
-      >
-        <h1 style={{ fontSize: 22, fontWeight: 600 }}>📧 Email Campaign Dashboard</h1>
+      <div className="page-header">
+        <h1 className="page-title">📧 Email Campaign Dashboard</h1>
         <RefreshButton />
       </div>
 
       <StatCardRow total={total} />
 
-      <section style={{ marginTop: 32 }}>
-        <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>
+      <section className="section">
+        <h2 className="section-title">
           📈 Weekly Trends (last {WEEKS_SHOWN} weeks)
         </h2>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))",
-            gap: 16,
-          }}
-        >
+        <div className="split-grid">
           <WeeklySentChart data={weeklyData} />
           <WeeklyRepliesChart data={weeklyData} />
         </div>
       </section>
 
-      <section
-        style={{
-          marginTop: 32,
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))",
-          gap: 16,
-        }}
-      >
+      <section className="section split-grid">
         <div>
-          <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>
-            🔄 Conversion Funnel
-          </h2>
+          <h2 className="section-title">🔄 Conversion Funnel</h2>
           <ConversionFunnelChart
             stats={{
               sent: total.sent,
@@ -90,38 +68,23 @@ export default async function DashboardPage() {
           />
         </div>
         <div>
-          <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>
-            📡 Platform Breakdown
-          </h2>
+          <h2 className="section-title">📡 Platform Breakdown</h2>
           <PlatformBreakdownChart data={platformStats.sent} />
         </div>
       </section>
 
-      <section style={{ marginTop: 32 }}>
-        <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>
-          ✅ Interested Contacts
-        </h2>
+      <section className="section">
+        <h2 className="section-title">✅ Interested Contacts</h2>
         <InterestedContactsTable rows={interestedContacts} />
       </section>
 
-      <section
-        style={{
-          marginTop: 32,
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))",
-          gap: 16,
-        }}
-      >
+      <section className="section split-grid">
         <div>
-          <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>
-            📋 Recent Replies
-          </h2>
+          <h2 className="section-title">📋 Recent Replies</h2>
           <RecentRepliesList replies={recentReplies} />
         </div>
         <div>
-          <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>
-            📊 Weekly Breakdown
-          </h2>
+          <h2 className="section-title">📊 Weekly Breakdown</h2>
           <WeeklyBreakdownTable data={weeklyData} />
         </div>
       </section>

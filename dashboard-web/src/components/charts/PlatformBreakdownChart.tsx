@@ -11,24 +11,29 @@ import {
   YAxis,
 } from "recharts";
 import type { PlatformSentRow } from "@/types/dashboard";
+import { useIsNarrow } from "@/lib/useIsNarrow";
 import ChartCard from "./ChartCard";
 import ChartTableFallback from "./ChartTableFallback";
 import ChartTooltip from "./ChartTooltip";
 import { COLOR } from "./palette";
+import { CHART_HEIGHT } from "./responsive";
 
 export default function PlatformBreakdownChart({ data }: { data: PlatformSentRow[] }) {
+  const isNarrow = useIsNarrow();
+
   const chart = (
-    <ResponsiveContainer width="100%" height={320}>
+    <ResponsiveContainer width="100%" height={CHART_HEIGHT(isNarrow)}>
       <BarChart data={data} barGap={2} barCategoryGap="20%">
         <CartesianGrid vertical={false} stroke={COLOR.gridline} strokeWidth={1} />
         <XAxis
           dataKey="platform"
-          tick={{ fill: "var(--text-muted)", fontSize: 12 }}
+          tick={{ fill: "var(--text-muted)", fontSize: isNarrow ? 11 : 12 }}
           axisLine={{ stroke: COLOR.baseline }}
           tickLine={false}
         />
         <YAxis
-          tick={{ fill: "var(--text-muted)", fontSize: 12 }}
+          width={isNarrow ? 32 : undefined}
+          tick={{ fill: "var(--text-muted)", fontSize: isNarrow ? 11 : 12 }}
           axisLine={false}
           tickLine={false}
           allowDecimals={false}

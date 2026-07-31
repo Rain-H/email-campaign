@@ -13,13 +13,7 @@ export default function StatCardRow({ total }: { total: TotalStats }) {
   const bm = BENCHMARKS;
 
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
-        gap: 12,
-      }}
-    >
+    <div className="stat-grid">
       <StatCard
         icon="📤"
         label="Sent"

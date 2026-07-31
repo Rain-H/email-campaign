@@ -1,10 +1,12 @@
 "use client";
 
 import { Funnel, FunnelChart, LabelList, ResponsiveContainer, Tooltip } from "recharts";
+import { useIsNarrow } from "@/lib/useIsNarrow";
 import ChartCard from "./ChartCard";
 import ChartTableFallback from "./ChartTableFallback";
 import ChartTooltip from "./ChartTooltip";
 import { FUNNEL_RAMP } from "./palette";
+import { CHART_HEIGHT } from "./responsive";
 
 interface FunnelStats {
   sent: number;
@@ -14,6 +16,8 @@ interface FunnelStats {
 }
 
 export default function ConversionFunnelChart({ stats }: { stats: FunnelStats }) {
+  const isNarrow = useIsNarrow();
+
   const stages = [
     { name: "Sent", value: stats.sent },
     { name: "Opened", value: stats.opened },
@@ -28,8 +32,12 @@ export default function ConversionFunnelChart({ stats }: { stats: FunnelStats })
   }));
 
   const chart = (
-    <ResponsiveContainer width="100%" height={320}>
-      <FunnelChart>
+    <ResponsiveContainer width="100%" height={CHART_HEIGHT(isNarrow)}>
+      {/* The stage name sits to the right of each trapezoid and the
+          count/percentage to its left, so the plot area has to leave room for
+          both — without these margins the outer labels are drawn past the
+          container edge and clipped once it gets narrow. */}
+      <FunnelChart margin={{ top: 8, bottom: 8, left: isNarrow ? 78 : 96, right: isNarrow ? 60 : 76 }}>
         <Tooltip content={<ChartTooltip />} />
         <Funnel dataKey="value" data={data} isAnimationActive={false}>
           <LabelList
@@ -37,14 +45,14 @@ export default function ConversionFunnelChart({ stats }: { stats: FunnelStats })
             dataKey="name"
             fill="var(--text-primary)"
             stroke="none"
-            fontSize={13}
+            fontSize={isNarrow ? 12 : 13}
           />
           <LabelList
             position="left"
             dataKey="pctLabel"
             fill="var(--text-secondary)"
             stroke="none"
-            fontSize={12}
+            fontSize={isNarrow ? 11 : 12}
           />
         </Funnel>
       </FunnelChart>

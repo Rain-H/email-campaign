@@ -11,7 +11,7 @@ export default function InterestedContactsTable({ rows }: { rows: InterestedCont
   }
 
   return (
-    <div style={{ overflowX: "auto" }}>
+    <div className="table-scroll">
       <table style={{ fontSize: 13 }}>
         <thead>
           <tr>

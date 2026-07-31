@@ -21,8 +21,11 @@ export default function ChartCard({ title, caption, chart, table }: ChartCardPro
         background: "var(--surface-1)",
         border: `1px solid var(--border)`,
         borderRadius: 8,
-        padding: 16,
+        padding: 12,
         margin: 0,
+        // lets the card shrink inside its grid track instead of forcing the
+        // track wider than a phone viewport
+        minWidth: 0,
       }}
     >
       <div
@@ -30,6 +33,8 @@ export default function ChartCard({ title, caption, chart, table }: ChartCardPro
           display: "flex",
           alignItems: "baseline",
           justifyContent: "space-between",
+          flexWrap: "wrap",
+          gap: 8,
           marginBottom: 4,
         }}
       >
@@ -43,10 +48,12 @@ export default function ChartCard({ title, caption, chart, table }: ChartCardPro
             background: "none",
             border: "1px solid var(--border)",
             borderRadius: 4,
-            padding: "2px 8px",
+            // roomy enough to be a comfortable touch target, not just a mouse one
+            padding: "6px 10px",
             fontSize: 12,
             color: "var(--text-secondary)",
             cursor: "pointer",
+            whiteSpace: "nowrap",
           }}
         >
           {showTable ? "View chart" : "View as table"}
