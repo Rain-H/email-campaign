@@ -592,36 +592,80 @@ class ConnectionLostError(RuntimeError):
     """The PostgreSQL connection died mid-scan, so the scan's result is a lie."""
 
 
-def _abort_if_connection_lost(conn, exc, progress: str):
-    """Re-raise as ConnectionLostError if `exc` means the DB connection is gone.
+def _connection_is_lost(conn, exc) -> bool:
+    """True if `exc` means the connection is gone, not that one contact failed.
 
     The per-contact handlers in the long IMAP loops deliberately swallow errors
     so that one unreadable mailbox can't kill a 3000-contact scan. A dead
-    connection is not a per-contact problem though: every remaining iteration
-    fails the same way, yet the loop keeps printing "Checked 3400/3464" and the
+    connection must not be swallowed the same way: every remaining iteration
+    fails identically, yet the loop keeps printing "Checked 3400/3464" and the
     run still ends with "Found 0 new reply(ies)" -- a false negative that looks
     exactly like a clean scan. Observed 2026-08-01: a full sync silently
-    dropped 16 real replies, 3 of them from interested contacts, and the only
-    reason we caught it was re-running the scan by hand. Fail loudly instead.
-
-    Note this is a *different* failure from the idle-in-transaction timeout
-    fixed in 31cf8f8: autocommit stopped the server killing us for holding a
-    transaction open, but the connection can still drop mid-scan (Neon's pooler
-    closing an idle connection, or plain network loss) roughly 30 minutes in.
-    That fix made the scan survive longer; this one makes its failure visible.
+    dropped 16 real replies, 3 of them from interested contacts.
     """
     import psycopg2
 
-    if conn.closed == 0 and not isinstance(
+    return conn.closed != 0 or isinstance(
         exc, (psycopg2.InterfaceError, psycopg2.OperationalError)
-    ):
-        return
+    )
+
+
+def live_connection(conn):
+    """Return `conn` if usable, otherwise a fresh connection.
+
+    get_connection() re-reads USE_TEST_DB, which main() sets from --test before
+    the first connect, so a reconnect can never silently cross from crm_test to
+    the production database.
+    """
+    from database.db_config import get_connection
+
+    return conn if conn.closed == 0 else get_connection()
+
+
+def _recover_connection(conn, exc, progress: str, attempts: int = 3):
+    """Return a live connection after `exc`; reconnect if it killed the old one.
+
+    Returns `conn` untouched for an ordinary per-contact fault, so the caller
+    falls through to its usual warn-and-continue path.
+
+    A dropped connection is recoverable and worth recovering: these loops run
+    30+ minutes, and the drop (Neon's pooler reclaiming the connection, or
+    plain network loss) says nothing about the remaining contacts. Aborting the
+    whole scan over it just means re-walking thousands of mailboxes. Rebuilding
+    in autocommit keeps every later write durable against a second drop.
+
+    This is a *different* failure from the idle-in-transaction timeout fixed in
+    31cf8f8. Autocommit stopped Neon killing us for holding a transaction open
+    across the loop; it does not stop the connection dropping on its own.
+
+    Raises ConnectionLostError only when the connection cannot be rebuilt --
+    at that point the rest of the scan really is unknowable, and saying so
+    beats reporting a clean result.
+    """
+    if not _connection_is_lost(conn, exc):
+        return conn
+
+    from database.db_config import get_connection
+
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            fresh = get_connection()
+        except Exception as reconnect_exc:
+            last_exc = reconnect_exc
+            if attempt < attempts:
+                time.sleep(2 * attempt)
+            continue
+        fresh.autocommit = True
+        print(f"    ~ DB connection lost {progress}; reconnected.")
+        return fresh
 
     raise ConnectionLostError(
-        f"database connection lost {progress}. Everything already written is "
-        f"safe (the scan runs in autocommit), but the remaining contacts were "
-        f"NOT checked -- their status is unknown, not clean. Re-run to finish; "
-        f"--contact-since YYYY-MM-DD narrows the scan enough to beat the drop."
+        f"database connection lost {progress}, and reconnecting failed "
+        f"{attempts}x ({last_exc}). Everything already written is safe, but "
+        f"the remaining contacts were NOT checked -- their status is unknown, "
+        f"not clean. Re-run to finish; --contact-since YYYY-MM-DD narrows the "
+        f"scan."
     ) from exc
 
 
@@ -657,6 +701,7 @@ def check_replies(conn, since_days: int = 30, contact_since: str = None) -> int:
     found = 0
     checked = 0
     seen_contacts = set()
+    retried = set()
 
     # Run the scan in autocommit mode. Each iteration spends seconds in IMAP
     # round-trips; without this, psycopg2 opens a transaction on the first
@@ -679,9 +724,14 @@ def check_replies(conn, since_days: int = 30, contact_since: str = None) -> int:
 
         since_date = (datetime.now() - timedelta(days=since_days)).strftime("%d-%b-%Y")
 
-        for contact in contacts:
+        # A worklist rather than a plain for-loop, so a contact whose write hit
+        # a dead connection can be pushed back on and retried once the
+        # connection is rebuilt -- that contact may have had a real reply.
+        queue = list(contacts)
+        while queue:
+            contact = queue.pop(0)
             contact_email = contact["email"].lower()
-            
+
             if contact_email in seen_contacts:
                 continue
             seen_contacts.add(contact_email)
@@ -771,11 +821,24 @@ def check_replies(conn, since_days: int = 30, contact_since: str = None) -> int:
                           f"(subject: {chosen['subject'][:50]}){verified_tag}")
 
             except Exception as e:
-                _abort_if_connection_lost(
+                recovered = _recover_connection(
                     conn, e,
                     f"after {checked}/{len(contacts)} contacts, "
                     f"{found} reply(ies) saved",
                 )
+                if recovered is not conn:
+                    conn = recovered
+                    if contact_email not in retried:
+                        # This contact failed only because the connection was
+                        # already dead, and it may have had a real reply that
+                        # never got written. Put it back for one retry on the
+                        # fresh connection; `retried` stops a flapping
+                        # connection from looping on it forever.
+                        retried.add(contact_email)
+                        seen_contacts.discard(contact_email)
+                        checked -= 1
+                        queue.insert(0, contact)
+                    continue
                 print(f"    ! Error checking replies for {contact_email}: {e}")
 
         mail.logout()
@@ -822,9 +885,17 @@ def sync_sent_emails(conn, since_days: int = 60) -> int:
         return 0
 
     print(f"  Checking Sent folder for emails to {len(contact_emails_original)} contacts...")
-    
+
     found = 0
-    
+
+    # Autocommit, for the same reason check_replies() uses it: this loop also
+    # spends its time in IMAP round-trips, and a single transaction spanning
+    # thousands of contacts both invites the idle-in-transaction kill and
+    # throws away every row synced so far when the connection drops.
+    prev_autocommit = conn.autocommit
+    conn.commit()  # autocommit can't be flipped inside an open transaction
+    conn.autocommit = True
+
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
         mail.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
@@ -914,18 +985,23 @@ def sync_sent_emails(conn, since_days: int = 60) -> int:
                         print(f"    Synced sent email to {original_email}: {subject[:40]}")
 
             except Exception as e:
-                _abort_if_connection_lost(
+                recovered = _recover_connection(
                     conn, e, f"with {found} sent email(s) synced"
                 )
+                if recovered is not conn:
+                    conn = recovered
+                    continue
                 print(f"    ! Error syncing sent emails to {original_email}: {e}")
                 continue
 
-        conn.commit()
         mail.logout()
     except ConnectionLostError:
         raise
     except Exception as e:
         print(f"  IMAP error: {e}")
+    finally:
+        if not conn.closed:
+            conn.autocommit = prev_autocommit
 
     print(f"  Synced {found} sent email(s) to conversations.")
     return found
@@ -1143,6 +1219,12 @@ def main():
         print("\n[Step 2] Checking IMAP for replies...")
         check_replies(conn, since_days=args.since_days, contact_since=args.contact_since)
 
+    # The IMAP steps run for 30+ minutes and rebuild the connection internally
+    # if it drops, which leaves this one closed. Refresh before each subsequent
+    # step -- otherwise Step 5 dies on `conn.cursor()` and the conversations
+    # table silently stays stale (it sat at 2026-05-18 for exactly this reason).
+    conn = live_connection(conn)
+
     # Step 3: AI classification
     if full_sync or args.replies_only:
         print("\n[Step 3] Classifying replies with AI...")
@@ -1152,6 +1234,8 @@ def main():
     if full_sync or args.replies_only:
         print("\n[Step 4] Syncing sent emails from IMAP Sent folder...")
         sync_sent_emails(conn, since_days=args.since_days)
+
+    conn = live_connection(conn)
 
     # Step 5: Sync to conversations table
     if full_sync or args.replies_only:
