@@ -24,6 +24,15 @@ def _is_test_mode():
     return os.getenv("USE_TEST_DB", "").strip() in ("1", "true", "yes")
 
 
+def _allow_local_db():
+    """Opt in to the discrete PG_* vars for a non-test connection.
+
+    Needed by local-only workflows such as init_db.py building a fresh
+    database; everything else should be going to Neon via DATABASE_URL.
+    """
+    return os.getenv("ALLOW_LOCAL_DB", "").strip() in ("1", "true", "yes")
+
+
 def get_connection(use_test_db=False):
     """返回 PostgreSQL 数据库连接。
 
@@ -31,8 +40,10 @@ def get_connection(use_test_db=False):
       1. DATABASE_URL env var (Streamlit Cloud / Neon convention) — used only
          for production. Ignored in test mode so test runs never touch prod.
       2. Discrete PG_HOST / PG_PORT / PG_USER / PG_PASSWORD / PG_DATABASE
-         env vars (local dev). Adds sslmode=require automatically for any
-         non-localhost host.
+         env vars. Adds sslmode=require automatically for any non-localhost
+         host. In test mode this is the normal path (crm_test is local). Out
+         of test mode it is a deliberate opt-in via ALLOW_LOCAL_DB=1 — see
+         the RuntimeError below for why it can't be the silent default.
 
     When use_test_db=True or env var USE_TEST_DB=1, connects to the test
     database (PG_DATABASE_TEST) instead of the production database.
@@ -50,6 +61,19 @@ def get_connection(use_test_db=False):
     db_url = os.getenv("DATABASE_URL")
     if db_url and not test_mode:
         return psycopg2.connect(db_url)
+
+    if not test_mode and not db_url and not _allow_local_db():
+        raise RuntimeError(
+            "DATABASE_URL is not set, and production lives on Neon.\n"
+            f"Falling back to the discrete PG_* vars would connect to "
+            f"{PG_USER}@{PG_HOST}:{PG_PORT}/{PG_DATABASE} instead — on this "
+            "machine that is a stale local copy of the campaign data, months "
+            "behind, and queries against it return confident wrong answers "
+            "rather than failing.\n"
+            "Fix: make sure .env is present and readable (db_config loads it "
+            "from the repo root). To connect locally on purpose, set "
+            "ALLOW_LOCAL_DB=1."
+        )
 
     db_name = PG_DATABASE_TEST if test_mode else PG_DATABASE
     sslmode = "disable" if PG_HOST in ("localhost", "127.0.0.1") else "require"

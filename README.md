@@ -51,10 +51,16 @@ OPENAI_API_KEY=sk-...
 EDAS_USERNAME=your_email@example.com
 EDAS_PASSWORD=your_password
 
-# Database
+# Database — production (Neon). Every script reads this; without it they
+# refuse to run rather than quietly falling back to a local database.
+DATABASE_URL=postgresql://user:password@ep-xxxx-pooler.region.aws.neon.tech/crm?sslmode=require
+
+# Database — local, used for the crm_test database that --test writes to.
+# Ignored for production connections unless you set ALLOW_LOCAL_DB=1.
 PG_HOST=localhost
 PG_PORT=5432
-PG_DBNAME=crm
+PG_DATABASE=crm
+PG_DATABASE_TEST=crm_test
 PG_USER=postgres
 PG_PASSWORD=your_password
 ```
