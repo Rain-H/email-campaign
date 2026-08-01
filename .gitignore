@@ -25,9 +25,6 @@ _*.csv
 # HTML debug snapshots
 *.html
 
-# Cursor debug logs
-.cursor/debug-*.log
-
 # launchd / cron run logs
 logs/
 

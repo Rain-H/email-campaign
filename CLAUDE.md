@@ -1,6 +1,6 @@
 # Email Campaign — Safety Rules
 
-These rules apply to every session in this project, regardless of which skill is active. They were migrated from `.cursor/rules/*.mdc` (Cursor's `alwaysApply: true` rules) — Claude Code doesn't have a separate always-apply rule file, so `CLAUDE.md` is the equivalent.
+These rules apply to every session in this project, regardless of which skill is active. Claude Code has no separate always-apply rule file, so this one is it — anything here is in force for every session, and nothing else needs to opt in.
 
 ## Sending emails requires explicit confirmation
 

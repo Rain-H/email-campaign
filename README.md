@@ -9,8 +9,9 @@ A Python toolkit for academic conference outreach: crawl conference chair contac
 - **Postmark Email Sender** (`send_postmark.py`): Send personalized cold emails via Postmark API with template support
 - **Follow-up Sender** (`send_followup.py`): Forward-style follow-ups to unreplied contacts
 - **CRM Tracking** (`crm_check.py`): Full email lifecycle tracking (sent → delivered → opened → clicked → replied → classified) via Postmark API + IMAP
-- **Dashboard** (`dashboard.py`): Streamlit campaign performance dashboard
+- **Dashboards**: `dashboard-web/` (Next.js, deployed on Vercel) is the live one; `dashboard.py` (Streamlit) is the original and is kept as a cross-check on its numbers
 - **Weekly Stats** (`weekly_stats.py`): Campaign performance reports with cumulative and per-week breakdowns
+- **Scheduled CRM sync** (`scripts/`): launchd job running `crm_check.py` every Monday 09:00
 
 ## Installation
 
@@ -128,15 +129,50 @@ python crm_check.py --test   # test database
 
 # Sync a single contact's full IMAP thread
 python sync_one_contact.py someone@university.edu
+
+# How many crawled chairs have never received a first cold email?
+python check_unsent_chairs.py
+
+# Fill in emails.body_text/body_html from Postmark for older sends
+# (Postmark only retains bodies ~45 days — older rows are skipped)
+python backfill_email_bodies.py            # dry run
+python backfill_email_bodies.py --apply
 ```
 
-### 6. Dashboard & Weekly Stats
+`crm_check.py` also runs unattended every Monday at 09:00 via launchd — see
+[Scheduled CRM Sync](#scheduled-crm-sync).
+
+### 6. Dashboards & Weekly Stats
 
 ```bash
+# Web dashboard (Next.js, the deployed one)
+cd dashboard-web && npm run dev      # http://localhost:3000
+
+# Streamlit dashboard (original; kept to cross-check the web one's numbers)
 streamlit run dashboard.py
+
 python weekly_stats.py
 python weekly_stats.py --last-weeks 4
 ```
+
+See `dashboard-web/README.md` for deployment and for the deliberate
+differences between the two dashboards.
+
+## Scheduled CRM Sync
+
+`scripts/run_crm_check.sh` wraps `crm_check.py` for unattended runs: it cd's into
+the project so `.env` resolves, disables any proxy, and appends timestamped output
+to `logs/crm_check.log`. `scripts/com.paperfox.crm-check.plist` is the launchd job
+that calls it every Monday at 09:00 (it runs on next wake if the Mac was asleep).
+
+```bash
+# install / remove the schedule
+launchctl load  ~/Library/LaunchAgents/com.paperfox.crm-check.plist
+launchctl unload ~/Library/LaunchAgents/com.paperfox.crm-check.plist
+```
+
+Both files hard-code the absolute project path, so they need editing if the
+project directory moves.
 
 ## Project Structure
 
@@ -148,14 +184,22 @@ email campaign/
 ├── send_followup.py            # Follow-up email sender
 ├── crm_check.py                # CRM status tracker (Postmark + IMAP + AI)
 ├── sync_one_contact.py         # Single-contact IMAP sync utility
-├── dashboard.py                # Streamlit campaign dashboard
+├── check_unsent_chairs.py      # Crawled chairs never sent a first email
+├── backfill_email_bodies.py    # Backfill emails.body_* from Postmark
+├── dashboard.py                # Streamlit dashboard (cross-check for dashboard-web)
 ├── weekly_stats.py             # Weekly campaign stats reporter
 ├── database/                   # PostgreSQL CRM module
 │   ├── schema.sql
 │   ├── crm_db.py
 │   ├── db_config.py
 │   └── init_db.py
+├── dashboard-web/              # Next.js dashboard deployed on Vercel (own README)
+├── scripts/                    # launchd weekly crm_check job
+│   ├── run_crm_check.sh
+│   └── com.paperfox.crm-check.plist
+├── .claude/skills/             # Agent skills for each workflow
 ├── data/                       # Crawl outputs & CRM exports (gitignored, see below)
+├── logs/                       # Crawl + scheduled-run logs (gitignored)
 ├── email-template.md           # Original template (v1)
 ├── email-template-v2.md        # Outreach template (default for follow-up forwards)
 ├── email-template-v3.md        # Alternate outreach template
@@ -164,6 +208,8 @@ email campaign/
 ├── followup-1.md               # Follow-up note template
 ├── test_data.csv               # Test recipients (local, not in git)
 ├── requirements.txt
+├── requirements-dashboard.txt  # Streamlit-only subset
+├── CLAUDE.md                   # Always-on safety rules (sending, test data, processes)
 └── .env                        # Environment variables (not in git)
 ```
 
