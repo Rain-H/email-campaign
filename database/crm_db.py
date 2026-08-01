@@ -75,6 +75,18 @@ def _parse_timestamp(ts_str: str) -> Optional[str]:
         return None
     try:
         ts_clean = ts_str.replace("Z", "+00:00")
+        # Postmark timestamps carry 7 fractional digits ("...:39.0000000-04:00").
+        # datetime.fromisoformat accepts only 3 or 6 before Python 3.11, and this
+        # runs on 3.9 — so normalise the fraction to exactly 6 digits. Without
+        # this the parse fell through to the RFC 2822 branch below, which cannot
+        # read ISO either, and the function returned None. Callers pass that
+        # straight into UPDATE ... SET <col> = %s, so every delivery timestamp
+        # was silently written as NULL over an already-NULL column: a no-op that
+        # still counted as "updated" and left 464 delivered messages from the
+        # 2026-07-31 batch looking unsent.
+        ts_clean = re.sub(
+            r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], ts_clean
+        )
         dt = datetime.fromisoformat(ts_clean)
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
