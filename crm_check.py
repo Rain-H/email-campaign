@@ -588,6 +588,43 @@ def is_auto_reply(subject: str) -> bool:
     return any(kw in subject_lower for kw in auto_keywords)
 
 
+class ConnectionLostError(RuntimeError):
+    """The PostgreSQL connection died mid-scan, so the scan's result is a lie."""
+
+
+def _abort_if_connection_lost(conn, exc, progress: str):
+    """Re-raise as ConnectionLostError if `exc` means the DB connection is gone.
+
+    The per-contact handlers in the long IMAP loops deliberately swallow errors
+    so that one unreadable mailbox can't kill a 3000-contact scan. A dead
+    connection is not a per-contact problem though: every remaining iteration
+    fails the same way, yet the loop keeps printing "Checked 3400/3464" and the
+    run still ends with "Found 0 new reply(ies)" -- a false negative that looks
+    exactly like a clean scan. Observed 2026-08-01: a full sync silently
+    dropped 16 real replies, 3 of them from interested contacts, and the only
+    reason we caught it was re-running the scan by hand. Fail loudly instead.
+
+    Note this is a *different* failure from the idle-in-transaction timeout
+    fixed in 31cf8f8: autocommit stopped the server killing us for holding a
+    transaction open, but the connection can still drop mid-scan (Neon's pooler
+    closing an idle connection, or plain network loss) roughly 30 minutes in.
+    That fix made the scan survive longer; this one makes its failure visible.
+    """
+    import psycopg2
+
+    if conn.closed == 0 and not isinstance(
+        exc, (psycopg2.InterfaceError, psycopg2.OperationalError)
+    ):
+        return
+
+    raise ConnectionLostError(
+        f"database connection lost {progress}. Everything already written is "
+        f"safe (the scan runs in autocommit), but the remaining contacts were "
+        f"NOT checked -- their status is unknown, not clean. Re-run to finish; "
+        f"--contact-since YYYY-MM-DD narrows the scan enough to beat the drop."
+    ) from exc
+
+
 def check_replies(conn, since_days: int = 30, contact_since: str = None) -> int:
     """Check IMAP inbox for replies using FROM-based search.
 
@@ -734,13 +771,24 @@ def check_replies(conn, since_days: int = 30, contact_since: str = None) -> int:
                           f"(subject: {chosen['subject'][:50]}){verified_tag}")
 
             except Exception as e:
+                _abort_if_connection_lost(
+                    conn, e,
+                    f"after {checked}/{len(contacts)} contacts, "
+                    f"{found} reply(ies) saved",
+                )
                 print(f"    ! Error checking replies for {contact_email}: {e}")
 
         mail.logout()
+    except ConnectionLostError:
+        raise
     except Exception as e:
         print(f"  IMAP error: {e}")
     finally:
-        conn.autocommit = prev_autocommit
+        # Only if it's still usable: when we get here via ConnectionLostError
+        # the connection is by definition dead, and touching it raises an
+        # InterfaceError out of the finally that replaces the real error.
+        if not conn.closed:
+            conn.autocommit = prev_autocommit
 
     print(f"  Found {found} new reply(ies).")
     return found
@@ -866,11 +914,16 @@ def sync_sent_emails(conn, since_days: int = 60) -> int:
                         print(f"    Synced sent email to {original_email}: {subject[:40]}")
 
             except Exception as e:
+                _abort_if_connection_lost(
+                    conn, e, f"with {found} sent email(s) synced"
+                )
                 print(f"    ! Error syncing sent emails to {original_email}: {e}")
                 continue
 
         conn.commit()
         mail.logout()
+    except ConnectionLostError:
+        raise
     except Exception as e:
         print(f"  IMAP error: {e}")
 
@@ -1120,4 +1173,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ConnectionLostError as e:
+        # Exit non-zero so the weekly launchd job surfaces this as a failure
+        # rather than logging a scan that "found nothing".
+        print(f"\nABORTED: {e}", file=sys.stderr)
+        sys.exit(1)
