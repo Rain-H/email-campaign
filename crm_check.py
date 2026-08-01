@@ -611,7 +611,15 @@ def _connection_is_lost(conn, exc) -> bool:
 
 
 def live_connection(conn):
-    """Return `conn` if usable, otherwise a fresh connection.
+    """Return `conn` if it still works, otherwise a fresh connection.
+
+    Probes with SELECT 1 rather than trusting conn.closed. That flag is
+    client-side only -- psycopg2 sets it when *it* closes the handle, so a
+    connection the server dropped (Neon's pooler reclaiming one that sat idle
+    through a 30-minute IMAP scan) still reports closed == 0 and gives itself
+    away only on the next statement. Checking the flag alone therefore waves
+    a dead connection straight through, which is precisely the crash this
+    function exists to prevent.
 
     get_connection() re-reads USE_TEST_DB, which main() sets from --test before
     the first connect, so a reconnect can never silently cross from crm_test to
@@ -619,7 +627,18 @@ def live_connection(conn):
     """
     from database.db_config import get_connection
 
-    return conn if conn.closed == 0 else get_connection()
+    if conn is not None and conn.closed == 0:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            return conn
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    return get_connection()
 
 
 def _recover_connection(conn, exc, progress: str, attempts: int = 3):
@@ -1230,6 +1249,8 @@ def main():
         print("\n[Step 3] Classifying replies with AI...")
         classify_replies(conn)
 
+    conn = live_connection(conn)
+
     # Step 4: Sync sent emails from IMAP
     if full_sync or args.replies_only:
         print("\n[Step 4] Syncing sent emails from IMAP Sent folder...")
@@ -1246,6 +1267,7 @@ def main():
         print(f"  Synced {outbound_count} outbound + {inbound_count} inbound messages to conversations.")
 
     # Report
+    conn = live_connection(conn)
     print_report(conn)
 
     if args.export_json:
