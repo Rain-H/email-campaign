@@ -588,7 +588,7 @@ def is_auto_reply(subject: str) -> bool:
     return any(kw in subject_lower for kw in auto_keywords)
 
 
-def check_replies(conn, since_days: int = 30) -> int:
+def check_replies(conn, since_days: int = 30, contact_since: str = None) -> int:
     """Check IMAP inbox for replies using FROM-based search.
 
     Searches for emails from contacts in the database (FROM + SINCE), then
@@ -608,17 +608,31 @@ def check_replies(conn, since_days: int = 30) -> int:
         print("  EMAIL_ADDRESS / EMAIL_PASSWORD not set, skipping IMAP.")
         return 0
 
-    contacts = get_unreplied_contacts(conn)
+    contacts = get_unreplied_contacts(conn, sent_since=contact_since)
     if not contacts:
         print("  No contacts to check replies for.")
         return 0
 
     contact_map = {c["email"].lower(): c for c in contacts}
-    print(f"  Checking replies from {len(contacts)} unreplied contacts...")
+    scope = f" sent on/after {contact_since}" if contact_since else ""
+    print(f"  Checking replies from {len(contacts)} unreplied contacts{scope}...")
 
     found = 0
     checked = 0
     seen_contacts = set()
+
+    # Run the scan in autocommit mode. Each iteration spends seconds in IMAP
+    # round-trips; without this, psycopg2 opens a transaction on the first
+    # statement and holds it open across the entire ~20-minute loop, which Neon
+    # kills with "terminating connection due to idle-in-transaction timeout"
+    # (observed 2026-08-01: died at 1900 of 2450 contacts, twice at the same
+    # point). Autocommit rather than a commit() at the foot of the loop body:
+    # the body has eight `continue` branches that skip the foot entirely,
+    # including the auto-reply skip, which is the common path. It also means a
+    # reply already written stays written if a later contact blows up.
+    prev_autocommit = conn.autocommit
+    conn.commit()  # autocommit can't be flipped inside an open transaction
+    conn.autocommit = True
 
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
@@ -722,10 +736,11 @@ def check_replies(conn, since_days: int = 30) -> int:
             except Exception as e:
                 print(f"    ! Error checking replies for {contact_email}: {e}")
 
-        conn.commit()
         mail.logout()
     except Exception as e:
         print(f"  IMAP error: {e}")
+    finally:
+        conn.autocommit = prev_autocommit
 
     print(f"  Found {found} new reply(ies).")
     return found
@@ -1025,6 +1040,11 @@ def main():
     parser.add_argument("--replies-only", action="store_true", help="Only check for replies")
     parser.add_argument("--report", action="store_true", help="Show report without syncing")
     parser.add_argument("--since-days", type=int, default=30, help="IMAP search window (days)")
+    parser.add_argument("--contact-since", type=str, default=None,
+                        help="Reply check only: skip contacts whose email was sent before YYYY-MM-DD. "
+                             "Each contact costs one IMAP round-trip, and one emailed long before the "
+                             "--since-days window can no longer produce a findable reply (slowest reply "
+                             "on record: 41 days). Omit to scan every contact.")
     parser.add_argument("--export-json", action="store_true", help="Export DB to crm.json after sync")
     parser.add_argument("--test", action="store_true", help="Use test database (crm_test) instead of production")
     parser.add_argument("--per-contact", action="store_true",
@@ -1068,7 +1088,7 @@ def main():
     # Step 2: IMAP reply detection
     if full_sync or args.replies_only:
         print("\n[Step 2] Checking IMAP for replies...")
-        check_replies(conn, since_days=args.since_days)
+        check_replies(conn, since_days=args.since_days, contact_since=args.contact_since)
 
     # Step 3: AI classification
     if full_sync or args.replies_only:

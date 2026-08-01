@@ -379,16 +379,32 @@ def get_contacts_for_sync(conn) -> List[Dict]:
     return rows
 
 
-def get_unreplied_contacts(conn) -> List[Dict]:
-    """Return contacts that have been sent an email but have no reply recorded."""
+def get_unreplied_contacts(conn, sent_since: Optional[str] = None) -> List[Dict]:
+    """Return contacts that have been sent an email but have no reply recorded.
+
+    `sent_since` ('YYYY-MM-DD') drops contacts whose email predates that date.
+    Worth using because the caller (crm_check.check_replies) searches IMAP over
+    a bounded recent window (`--since-days`, default 30): for a contact emailed
+    long before that window, the only reply that could still be found is one
+    sent an implausibly long time after the original. Measured against this
+    campaign's own history, the slowest reply ever recorded arrived 41 days
+    out, so contacts older than a couple of months cost one IMAP round-trip
+    each and cannot return anything. Omit to scan every contact.
+    """
     cur = conn.cursor()
-    cur.execute("""
+    sql = """
         SELECT email, chair_name, postmark_message_id, email_id, subject, sent_at
         FROM contact_status
         WHERE status NOT IN ('failed')
           AND replied_at IS NULL
           AND postmark_message_id IS NOT NULL
-    """)
+    """
+    params: List = []
+    if sent_since:
+        sql += " AND sent_at >= %s"
+        params.append(sent_since)
+
+    cur.execute(sql, params)
     cols = [desc[0] for desc in cur.description]
     rows = [dict(zip(cols, row)) for row in cur.fetchall()]
     cur.close()
