@@ -33,6 +33,28 @@ These rules apply to every session in this project, regardless of which skill is
 - **The Postmark server is shared with PaperFox product emails** (`notifications@paperfox.ai` sends things like "Review Submitted"). Cold campaign emails come from `rain@paperfox.ai` (`POSTMARK_SENDER_EMAIL`). When querying `/messages/outbound`, always filter by sender/recipient — never assume all messages on the account are cold-campaign emails.
 - **Postmark only retains outbound message activity/content for ~45 days** (confirmed 2026-07-24: a message from 2026-05-19, 66 days old, returned `422 "This message was not found"` from `/messages/outbound/{id}/details`). Anything older is gone from Postmark's side — the project's own `emails` table in PostgreSQL is the only surviving record past that window. Don't expect Postmark to be able to confirm or deny old sends.
 
+## Never contact a suppressed address
+
+- The `suppressions` table in PostgreSQL is the do-not-contact list. If an
+  address is in it, no campaign email, no follow-up, no exceptions.
+- It is enforced in three places, and all three must stay: the SQL in
+  `crm_db.get_followup_candidates`, and an in-memory re-check in both
+  `send_postmark.py` and `send_followup.py` immediately before composing.
+  The duplication is on purpose — the in-memory check is the last gate before
+  mail leaves, and it covers recipient lists that never touch the candidates
+  query, such as a CSV handed to `send_postmark.py`.
+- A failed suppression lookup must **abort the send**, never fall back to an
+  empty set. Empty reads as "nobody is suppressed" and mails exactly the
+  people who asked us to stop.
+- Reasons: `opt_out` (asked us to stop), `declined` (said no, including a
+  polite "we're happy with EasyChair"), `wrong_contact` (not the decision
+  maker), `manual`. `opt_out` also blocks `reply_send.py`; the others only
+  warn there, since someone who declined but then wrote to us still asked a
+  question.
+- Manage it with `suppress.py` (`--add`, `--list`, `--check`, `--scan`).
+  Never keep a do-not-contact list in a file in this repo — the repo is
+  public, and the list is other people's personal data.
+
 ## Related skills
 
 - `postmark-cold-email` — sending the initial campaign
