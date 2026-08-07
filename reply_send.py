@@ -25,7 +25,8 @@ import smtplib
 import ssl
 import sys
 import time
-from email.message import EmailMessage
+from email.header import Header
+from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid, parseaddr
 from pathlib import Path
 
@@ -43,6 +44,25 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS") or os.getenv("POSTMARK_SENDER_EMAIL")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 SENDER_NAME = os.getenv("SENDER_NAME", "Rain Jiang")
+
+
+def is_ascii(value):
+    try:
+        (value or "").encode("ascii")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def unfold(value):
+    """Collapse RFC 5322 folding whitespace into single spaces.
+
+    A long Message-ID arrives from IMAP split across lines, and feeding that
+    straight back into a header raises "Header values may not contain linefeed
+    or carriage return characters" — so threading breaks on exactly the long
+    ids that Exchange and Outlook generate.
+    """
+    return " ".join(value.split()) if value else value
 
 
 def find_their_message(to_addr):
@@ -65,8 +85,8 @@ def find_their_message(to_addr):
             "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE REFERENCES)])",
         )
         msg = email_lib.message_from_bytes(fetched[0][1])
-        return (msg.get("Message-ID"), msg.get("References"),
-                msg.get("Subject"), msg.get("Date"))
+        return (unfold(msg.get("Message-ID")), unfold(msg.get("References")),
+                unfold(msg.get("Subject")), unfold(msg.get("Date")))
     finally:
         try:
             mail.logout()
@@ -162,10 +182,19 @@ def main():
     if not subject.lower().startswith("re:"):
         subject = f"Re: {subject}"
 
-    msg = EmailMessage()
+    # MIMEText (compat32), not EmailMessage. EmailMessage's default policy does
+    # not register in-reply-to/references as msg-id headers, so it treats them
+    # as free text: a Message-ID longer than the 78-column fold limit has no
+    # whitespace to fold at, and the policy falls back to RFC 2047 encoded-words
+    # (=?utf-8?q?=3C...?=). An encoded-word in In-Reply-To is not a msg-id, so
+    # the reply silently stops threading. Exchange and Outlook routinely emit
+    # ids past that length, which is most of academia. compat32 passes ASCII
+    # header values through untouched.
+    msg = MIMEText(body, "plain", "utf-8")
     msg["From"] = f"{SENDER_NAME} <{EMAIL_ADDRESS}>"
     msg["To"] = to_addr
-    msg["Subject"] = subject
+    msg["Subject"] = (subject if is_ascii(subject)
+                      else Header(subject, "utf-8").encode())
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid(domain=EMAIL_ADDRESS.split("@")[-1])
     if their_id:
@@ -173,7 +202,6 @@ def main():
         # Chain their References plus their own id, so clients that build the
         # thread from References (not just In-Reply-To) also get it right.
         msg["References"] = " ".join(filter(None, [their_refs, their_id]))
-    msg.set_content(body)
 
     print("\n" + "=" * 62)
     print("  DRY RUN — nothing sent" if not args.send else "  SENDING")
