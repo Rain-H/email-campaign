@@ -445,13 +445,19 @@ def get_unclassified_replies(conn) -> List[Dict]:
     return rows
 
 
-def get_followup_candidates(conn, min_days: int = 0) -> List[Dict]:
+def get_followup_candidates(conn, min_days: int = 0,
+                            sent_on: Optional[str] = None) -> List[Dict]:
     """Return contacts eligible for a follow-up email.
 
     Eligible = delivered, no reply, no bounce, and only one email sent so far
     (i.e. no follow-up already sent).
     Optional min_days filters to contacts whose first email was sent at least
     N days ago.
+    Optional sent_on ('YYYY-MM-DD') restricts to a single send batch — the
+    contacts whose first email went out on exactly that date. Needed because
+    results are ordered oldest-first, so `limit` alone always takes the oldest
+    backlog and can never reach a recent batch. Campaign sends happen in
+    discrete daily batches, which is what makes a single date a useful handle.
 
     Each row carries body_text / body_html from the original send so the
     caller can forward the exact content that was delivered, rather than
@@ -470,6 +476,10 @@ def get_followup_candidates(conn, min_days: int = 0) -> List[Dict]:
     if min_days > 0:
         day_filter = "AND cs.sent_at < NOW() - INTERVAL '%s days'"
         params.append(min_days)
+    batch_filter = ""
+    if sent_on:
+        batch_filter = "AND cs.sent_at >= %s::date AND cs.sent_at < %s::date + 1"
+        params.extend([sent_on, sent_on])
     cur.execute(f"""
         SELECT cs.email, cs.chair_name, cs.conference,
                cs.sent_at, cs.status,
@@ -480,6 +490,7 @@ def get_followup_candidates(conn, min_days: int = 0) -> List[Dict]:
           AND cs.bounced_at IS NULL
           AND cs.replied_at IS NULL
           {day_filter}
+          {batch_filter}
           AND (SELECT COUNT(*) FROM emails WHERE contact_email = cs.email) = 1
         ORDER BY cs.sent_at ASC
     """, params)

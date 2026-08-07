@@ -10,6 +10,7 @@ import argparse
 import os
 import sys
 import time
+from collections import Counter
 
 from dotenv import load_dotenv
 
@@ -92,6 +93,11 @@ def main():
                         help="Limit number of emails to send (0 = no limit)")
     parser.add_argument("--min-days", type=int, default=0,
                         help="Only follow up contacts whose first email was sent N+ days ago (0 = no minimum)")
+    parser.add_argument("--sent-on", metavar="YYYY-MM-DD", default=None,
+                        help="Only follow up one send batch: contacts whose first email went "
+                             "out on this date. Candidates are ordered oldest-first, so --limit "
+                             "alone always takes the oldest backlog and can never reach a recent "
+                             "batch — use this to target one.")
     parser.add_argument("--template", default="followup-1.md",
                         help="Path to follow-up body template file")
     parser.add_argument("--test", action="store_true",
@@ -112,7 +118,8 @@ def main():
     from database.crm_db import get_followup_candidates
 
     conn = get_connection()
-    candidates = get_followup_candidates(conn, min_days=args.min_days)
+    candidates = get_followup_candidates(conn, min_days=args.min_days,
+                                         sent_on=args.sent_on)
     conn.close()
 
     for c in candidates:
@@ -121,6 +128,8 @@ def main():
     print(f"Found {len(candidates)} unreplied contact(s) eligible for follow-up")
     if args.min_days > 0:
         print(f"  (filtered to first email sent {args.min_days}+ days ago)")
+    if args.sent_on:
+        print(f"  (filtered to the batch first emailed on {args.sent_on})")
 
     # Skip contacts whose original body was never stored / cannot be backfilled
     # (typically: sent > 45 days ago, before Postmark's retention window).
@@ -143,6 +152,15 @@ def main():
     if not candidates:
         print("No contacts to follow up. Done.")
         return
+
+    # Show which send batches the final recipient list actually spans. Candidates
+    # come back oldest-first, so a --limit without --sent-on quietly targets the
+    # oldest backlog instead of the batch the operator had in mind — a mistake
+    # that is invisible unless these dates are on screen before --send.
+    batch_counts = Counter(c["sent_at"].strftime("%Y-%m-%d") for c in candidates)
+    print(f"\nRecipients by first-email date ({len(candidates)} total):")
+    for day in sorted(batch_counts):
+        print(f"  {day}  {batch_counts[day]}")
 
     dry_run = not args.send
     if dry_run:
