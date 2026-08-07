@@ -108,6 +108,17 @@ CREATE INDEX IF NOT EXISTS idx_conversations_message_at ON conversations(message
 -- ============================================
 -- 视图：联系人当前状态
 -- ============================================
+-- 说明 / Note on which email each column comes from:
+--   Identity columns (email_id, postmark_message_id, subject, sent_at) describe
+--   the MOST RECENT email — that is the one a follow-up or a reply would thread
+--   onto, and downstream code joins emails back on email_id.
+--   Engagement columns (delivered_at, opened_at, open_count, clicked_at) are
+--   aggregated across ALL of the contact's emails. A chair who clicked the
+--   first email and only opened the follow-up has still clicked, and must not
+--   be demoted to 'opened_no_reply' just because the newest email has no click.
+--   bounce_* stays on the latest email deliberately: an address that bounced
+--   once but delivered since is not failed, and bounce-wins ordering in the
+--   CASE below is relied on by crm_check.py.
 CREATE OR REPLACE VIEW contact_status AS
 SELECT
     c.email,
@@ -117,10 +128,10 @@ SELECT
     e.postmark_message_id,
     e.subject,
     e.sent_at,
-    e.delivered_at,
-    e.opened_at,
-    e.open_count,
-    e.clicked_at,
+    agg.delivered_at,
+    agg.opened_at,
+    agg.open_count,
+    agg.clicked_at,
     e.bounced_at,
     e.bounce_type,
     r.replied_at,
@@ -131,21 +142,44 @@ SELECT
         WHEN e.bounced_at IS NOT NULL THEN 'failed'
         WHEN r.replied_at IS NOT NULL AND r.is_interested = false THEN 'replied_not_interested'
         WHEN r.replied_at IS NOT NULL AND r.is_interested = true THEN 'replied_interested'
-        WHEN e.clicked_at IS NOT NULL THEN 'clicked_no_reply'
-        WHEN e.opened_at IS NOT NULL THEN 'opened_no_reply'
+        WHEN agg.clicked_at IS NOT NULL THEN 'clicked_no_reply'
+        WHEN agg.opened_at IS NOT NULL THEN 'opened_no_reply'
         ELSE 'no_reply'
     END AS status,
 
     c.updated_at AS last_updated
 
 FROM contacts c
+-- Latest email: supplies the contact's identity/threading columns.
 LEFT JOIN LATERAL (
     SELECT * FROM emails
     WHERE contact_email = c.email
     ORDER BY sent_at DESC
     LIMIT 1
 ) e ON true
-LEFT JOIN replies r ON r.email_id = e.id;
+-- Engagement rolled up over every email sent to this contact. One indexed
+-- scan on idx_emails_contact per contact, same access path as the LATERAL
+-- above, so this does not reproduce the planner blow-up documented in
+-- crm_db.get_followup_candidates (that was a plain re-JOIN, not a LATERAL).
+LEFT JOIN LATERAL (
+    SELECT MAX(delivered_at)      AS delivered_at,
+           MAX(opened_at)         AS opened_at,
+           SUM(open_count)::INTEGER AS open_count,
+           MAX(clicked_at)        AS clicked_at
+    FROM emails
+    WHERE contact_email = c.email
+) agg ON true
+-- Most recent reply across ALL emails, not just the latest one. Also collapses
+-- multiple replies to a single email, which the previous plain JOIN on
+-- replies would have fanned out into duplicate rows per contact.
+LEFT JOIN LATERAL (
+    SELECT rp.replied_at, rp.is_interested, rp.full_content
+    FROM replies rp
+    JOIN emails em ON em.id = rp.email_id
+    WHERE em.contact_email = c.email
+    ORDER BY rp.replied_at DESC
+    LIMIT 1
+) r ON true;
 
 -- ============================================
 -- 视图：统计报表
