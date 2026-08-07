@@ -115,12 +115,24 @@ def main():
     body_template = load_followup_body(args.template)
 
     from database.db_config import get_connection
-    from database.crm_db import get_followup_candidates
+    from database.crm_db import get_followup_candidates, get_suppressed_emails
 
     conn = get_connection()
     candidates = get_followup_candidates(conn, min_days=args.min_days,
                                          sent_on=args.sent_on)
+    # get_followup_candidates already excludes suppressed addresses in SQL.
+    # Re-checking here is deliberate: this is the last gate before mail goes
+    # out, and it also covers any future caller that builds a candidate list
+    # some other way.
+    suppressed = get_suppressed_emails(conn)
     conn.close()
+
+    blocked = [c for c in candidates if c["email"].lower() in suppressed]
+    candidates = [c for c in candidates if c["email"].lower() not in suppressed]
+    if blocked:
+        print(f"BLOCKED {len(blocked)} suppressed contact(s) — will not be emailed:")
+        for c in blocked:
+            print(f"    - {c['email']}")
 
     for c in candidates:
         c["first_name"] = extract_greeting_name(c["chair_name"])

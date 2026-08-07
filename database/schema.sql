@@ -95,8 +95,28 @@ CREATE TABLE IF NOT EXISTS conversations (
 );
 
 -- ============================================
+-- 5. 屏蔽表 (永不发送)
+-- ============================================
+-- Deliberately NOT foreign-keyed to contacts: an address must be suppressible
+-- before it is ever crawled, and must survive a contact row being deleted.
+-- Email is stored lowercased; every lookup lowercases too.
+CREATE TABLE IF NOT EXISTS suppressions (
+    email TEXT PRIMARY KEY,
+
+    -- 'opt_out'  — explicitly asked us to stop (never send, no exceptions)
+    -- 'declined' — explicitly said they are not interested
+    -- 'manual'   — added by hand, see note
+    reason TEXT NOT NULL,
+
+    note TEXT,
+    source TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ============================================
 -- 索引
 -- ============================================
+CREATE INDEX IF NOT EXISTS idx_suppressions_reason ON suppressions(reason);
 CREATE INDEX IF NOT EXISTS idx_emails_contact ON emails(contact_email);
 CREATE INDEX IF NOT EXISTS idx_emails_sent_at ON emails(sent_at);
 CREATE INDEX IF NOT EXISTS idx_replies_email ON replies(email_id);

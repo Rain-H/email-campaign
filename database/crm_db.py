@@ -360,6 +360,46 @@ def sync_replies_to_conversations(conn) -> int:
     return count
 
 
+# ── Suppression list ────────────────────────────────────────────────
+
+def add_suppression(conn, email: str, reason: str, note: str = None,
+                    source: str = None) -> bool:
+    """Add an address to the never-send list. Returns True if newly added.
+
+    Re-adding an existing address keeps the original reason and created_at —
+    a suppression must never be silently weakened (e.g. an 'opt_out' being
+    overwritten by a later 'declined'), and the original date is the record of
+    when we were first told.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO suppressions (email, reason, note, source)
+           VALUES (LOWER(%s), %s, %s, %s)
+           ON CONFLICT (email) DO NOTHING""",
+        (email.strip(), reason, note, source),
+    )
+    added = cur.rowcount > 0
+    cur.close()
+    return added
+
+
+def get_suppressed_emails(conn) -> set:
+    """Return every suppressed address, lowercased, as a set for O(1) filtering."""
+    cur = conn.cursor()
+    cur.execute("SELECT LOWER(email) FROM suppressions")
+    rows = {r[0] for r in cur.fetchall()}
+    cur.close()
+    return rows
+
+
+def is_suppressed(conn, email: str) -> bool:
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM suppressions WHERE email = LOWER(%s)", (email.strip(),))
+    hit = cur.fetchone() is not None
+    cur.close()
+    return hit
+
+
 # ── Query operations ────────────────────────────────────────────────
 
 def get_all_contacts(conn) -> List[Dict]:
@@ -489,6 +529,8 @@ def get_followup_candidates(conn, min_days: int = 0,
         WHERE cs.status IN ('no_reply', 'opened_no_reply', 'clicked_no_reply')
           AND cs.bounced_at IS NULL
           AND cs.replied_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM suppressions s
+                          WHERE s.email = LOWER(cs.email))
           {day_filter}
           {batch_filter}
           AND (SELECT COUNT(*) FROM emails WHERE contact_email = cs.email) = 1

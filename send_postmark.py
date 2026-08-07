@@ -239,6 +239,23 @@ def load_recipients(path):
 
 # ---------- skip already sent ----------
 
+def _get_suppressed_emails() -> set:
+    """Query the never-send list.
+
+    Unlike _get_already_sent_emails() below, this deliberately does NOT swallow
+    errors. An empty set on failure would read as "nobody is suppressed" and
+    mail the exact people who asked us to stop, so a broken lookup has to stop
+    the send instead of quietly permitting it.
+    """
+    from database.db_config import get_connection
+    from database.crm_db import get_suppressed_emails
+    conn = get_connection()
+    try:
+        return get_suppressed_emails(conn)
+    finally:
+        conn.close()
+
+
 def _get_already_sent_emails() -> set:
     """Query DB for all emails that were already sent (including bounced)."""
     try:
@@ -358,6 +375,17 @@ def main():
     # Load recipients
     recipients = load_recipients(args.data_file)
     print(f"Loaded {len(recipients)} recipients from {args.data_file}")
+
+    # Never-send list, checked before anything else. Reported loudly rather
+    # than silently dropped: if a suppressed address turns up in a recipient
+    # file, the operator needs to see that the list caught it.
+    suppressed = _get_suppressed_emails()
+    blocked = [r for r in recipients if r["chair_email"].lower() in suppressed]
+    recipients = [r for r in recipients if r["chair_email"].lower() not in suppressed]
+    if blocked:
+        print(f"BLOCKED {len(blocked)} suppressed recipient(s) — will not be emailed:")
+        for r in blocked:
+            print(f"    - {r['chair_email']}")
 
     # Skip already-sent emails (query DB)
     already_sent = _get_already_sent_emails()
