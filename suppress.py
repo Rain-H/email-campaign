@@ -12,9 +12,14 @@ contact — so an address can be suppressed before it is ever crawled.
     python3 suppress.py --scan --apply    # ...and suppress the unambiguous ones
 
 Reasons:
-    opt_out   explicitly asked us to stop. Never send, no exceptions.
-    declined  explicitly said they are not interested.
-    manual    added by hand; put the why in --note.
+    opt_out       explicitly asked us to stop. Never send, no exceptions.
+    declined      said no — including a polite "we're happy with EasyChair".
+    wrong_contact told us they are not the decision maker for this conference.
+    manual        added by hand; put the why in --note.
+
+Deliberately NOT suppressed: anyone who declined for this cycle but invited
+future contact ("we might consider this for future editions"). They are live
+future-cycle leads, and a permanent block would quietly delete them.
 """
 
 import argparse
@@ -27,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from database.db_config import get_connection
 from database.crm_db import add_suppression, is_suppressed
 
-REASONS = ("opt_out", "declined", "manual")
+REASONS = ("opt_out", "declined", "wrong_contact", "manual")
 
 # Phrases that are a request to stop being contacted. Deliberately narrow:
 # a false positive here silently deletes a prospect, so borderline wording
